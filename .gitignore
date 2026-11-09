@@ -1,0 +1,19 @@
+# Secrets - never commit wallet seeds or API keys
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data
+*.db
+*.sqlite
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
