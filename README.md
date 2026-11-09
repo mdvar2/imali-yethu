@@ -122,6 +122,6 @@ Rigged tender decisions before the payment stage, and cash bribes. Next steps: l
 | Name | Role |
 | --- | --- |
 | Melusi | AI agent, XRPL payments and escrow |
-| *[Teammate]* | Security: multisig, rules server, dashboards |
+| Nelisiwe | Security: multisig, rules server, dashboards |
 
 *All supplier, official and price data in this repo is sample data.*
