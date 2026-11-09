@@ -1,4 +1,4 @@
-# Rules server (owner: Nelisiwe and Melusi)
+# Rules server (owners: Nelisiwe and Melusi)
 
 Independent FastAPI service. It co-signs a payment only if every check passes:
 

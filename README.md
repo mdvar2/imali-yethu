@@ -135,7 +135,7 @@ python scripts/first_payment.py   # first payment on XRPL Testnet, prints the ex
 
 | Step | Transaction |
 | --- | --- |
-| First payment (Treasury → Honest Supplier, invoice memo) | *add explorer link here* |
+| First payment (Treasury → Honest Supplier, 10 XRP, memo INV-2026-0001) | [7E5179…AEC57](https://testnet.xrpl.org/transactions/7E5179129DA1FB6847C7ADA11A49E3EEB65691EDE8F2D56CE5F56B68242AEC57) |
 
 ## Build plan
 
