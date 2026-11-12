@@ -1,0 +1,57 @@
+
+from decimal import Decimal
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="Imali Yethu Rules Server")
+
+# Demonstration policy only.
+# Production policies must be stored securely and managed
+# by authorised human operators, never by the AI agent.
+APPROVED_SUPPLIERS = {"SUP-001", "SUP-002"}
+MAX_PAYMENT = Decimal("50000.00")
+APPROVED_INVOICES = {
+    "INV-2026-0001": {
+        "supplier_id": "SUP-001",
+        "amount": Decimal("15000.00"),
+    }
+}
+
+
+class PaymentRequest(BaseModel):
+    invoice_number: str
+    supplier_id: str
+    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "service": "rules-server"}
+
+
+@app.post("/validate-payment")
+def validate_payment(payment: PaymentRequest):
+    reasons = []
+
+    if payment.supplier_id not in APPROVED_SUPPLIERS:
+        reasons.append("Supplier is not approved")
+
+    if payment.amount > MAX_PAYMENT:
+        reasons.append("Payment exceeds the spending limit")
+
+    invoice = APPROVED_INVOICES.get(payment.invoice_number)
+
+    if invoice is None:
+        reasons.append("Invoice is not registered")
+    else:
+        if invoice["supplier_id"] != payment.supplier_id:
+            reasons.append("Supplier does not match approved invoice")
+
+        if invoice["amount"] != payment.amount:
+            reasons.append("Amount does not match approved invoice")
+
+    return {
+        "approved": len(reasons) == 0,
+        "invoice_number": payment.invoice_number,
+        "reasons": reasons,
+    }
