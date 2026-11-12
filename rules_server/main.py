@@ -1,4 +1,4 @@
-
+from rules_server.authorization import authorize_invoice
 from decimal import Decimal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -55,3 +55,22 @@ def validate_payment(payment: PaymentRequest):
         "invoice_number": payment.invoice_number,
         "reasons": reasons,
     }
+
+@app.post("/authorize-payment")
+def authorize_payment(payment: PaymentRequest):
+    validation = validate_payment(payment)
+
+    if not validation["approved"]:
+        return {
+            "authorized": False,
+            "reasons": validation["reasons"],
+        }
+
+    result = authorize_invoice(
+        invoice_number=payment.invoice_number,
+        supplier_id=payment.supplier_id,
+        amount=str(payment.amount),
+    )
+
+    return result
+
