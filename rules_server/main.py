@@ -1,6 +1,8 @@
 import os
 import secrets
 
+from rules_server.authorization import authorize_invoice
+from rules_server.xrpl_verification import verify_xrpl_transaction
 from fastapi import Depends, Header, HTTPException
 from rules_server.authorization import authorize_invoice
 from decimal import Decimal
@@ -100,4 +102,12 @@ def authorize_payment(payment: PaymentRequest):
     )
 
     return result
+
+
+@app.post(
+    "/verify-xrpl-transaction",
+    dependencies=[Depends(require_service_key)],
+)
+def verify_transaction(transaction: dict):
+    return verify_xrpl_transaction(transaction)
 
