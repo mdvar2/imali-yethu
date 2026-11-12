@@ -1,3 +1,7 @@
+import os
+import secrets
+
+from fastapi import Depends, Header, HTTPException
 from rules_server.authorization import authorize_invoice
 from decimal import Decimal
 from fastapi import FastAPI
@@ -22,6 +26,26 @@ class PaymentRequest(BaseModel):
     invoice_number: str
     supplier_id: str
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+
+
+def require_service_key(
+    x_service_key: str | None = Header(default=None),
+):
+    expected_key = os.getenv("RULES_SERVER_API_KEY")
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Rules server authentication is not configured",
+        )
+
+    if not x_service_key or not secrets.compare_digest(
+        x_service_key, expected_key
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid service credentials",
+        )
 
 
 @app.get("/health")
@@ -56,7 +80,10 @@ def validate_payment(payment: PaymentRequest):
         "reasons": reasons,
     }
 
-@app.post("/authorize-payment")
+@app.post(
+    "/authorize-payment",
+    dependencies=[Depends(require_service_key)],
+)
 def authorize_payment(payment: PaymentRequest):
     validation = validate_payment(payment)
 
