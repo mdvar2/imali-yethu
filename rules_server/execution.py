@@ -28,6 +28,9 @@ INVOICE = "INV-2026-0001"
 SUPPLIER_ID = "SUP-001"
 INVOICE_AMOUNT = "15000.00"
 
+# 10 XRP expressed in drops, for Testnet demonstration only.
+PAYMENT_AMOUNT_DROPS = "10000000"
+
 
 def transaction_hash(blob: str) -> str:
     """Compute the XRPL transaction ID from its signed blob."""
@@ -95,8 +98,41 @@ def submit_signed_blob(client, blob):
     )
 
 
+def verify_invoice_memo(transaction):
+    """Verify that the payment contains the expected invoice memo."""
+
+    memos = transaction.get("Memos")
+
+    if not isinstance(memos, list) or len(memos) != 1:
+        raise ValueError("Missing or unexpected invoice memo")
+
+    entry = memos[0]
+
+    if not isinstance(entry, dict):
+        raise ValueError("Invalid invoice memo structure")
+
+    memo = entry.get("Memo")
+
+    if not isinstance(memo, dict):
+        raise ValueError("Invalid invoice memo structure")
+
+    memo_data = memo.get("MemoData")
+
+    if not isinstance(memo_data, str):
+        raise ValueError("Missing invoice memo data")
+
+    try:
+        decoded = bytes.fromhex(memo_data).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("Invalid invoice memo encoding") from None
+
+    if decoded != INVOICE:
+        raise ValueError("Invoice memo mismatch")
+
+
 def check_validated_payment(client, tx_hash):
-    """Check whether the transaction is validated on the ledger."""
+    """Verify the exact intended payment on the validated XRPL ledger."""
+
     response = client.request(
         Tx(transaction=tx_hash, binary=False)
     )
@@ -109,13 +145,43 @@ def check_validated_payment(client, tx_hash):
     if result.get("validated") is not True:
         return None
 
-    meta = result.get("meta", {})
+    expected_treasury = os.environ["DEMO_TREASURY_ADDRESS"]
+    expected_supplier = os.environ["HONEST_SUPPLIER_ADDRESS"]
 
-    outcome = (
-        meta.get("TransactionResult")
-        if isinstance(meta, dict)
-        else None
-    )
+    transaction = result.get("tx_json", result)
+
+    if not isinstance(transaction, dict):
+        raise ValueError("Invalid ledger transaction response")
+
+    actual_hash = result.get("hash") or transaction.get("hash")
+
+    if actual_hash != tx_hash:
+        raise ValueError("Ledger transaction hash mismatch")
+
+    if transaction.get("TransactionType") != "Payment":
+        raise ValueError("Unexpected transaction type")
+
+    if transaction.get("Account") != expected_treasury:
+        raise ValueError("Unexpected Treasury account")
+
+    if transaction.get("Destination") != expected_supplier:
+        raise ValueError("Unexpected payment destination")
+
+    if transaction.get("Amount") != PAYMENT_AMOUNT_DROPS:
+        raise ValueError("Unexpected payment amount")
+
+    # Confirm that this payment belongs to our approved invoice.
+    verify_invoice_memo(transaction)
+
+    metadata = result.get("meta", {})
+
+    if not isinstance(metadata, dict):
+        raise ValueError("Invalid transaction metadata")
+
+    outcome = metadata.get("TransactionResult")
+
+    if not isinstance(outcome, str):
+        raise ValueError("Missing ledger transaction result")
 
     return outcome
 

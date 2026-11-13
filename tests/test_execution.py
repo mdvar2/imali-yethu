@@ -1,9 +1,14 @@
-
 """Tests for guarded XRPL Testnet execution."""
 
 from unittest.mock import MagicMock, patch
 
-from rules_server.execution import execute_agent_payment
+import pytest
+
+from rules_server.execution import (
+    check_validated_payment,
+    execute_agent_payment,
+    verify_invoice_memo,
+)
 
 
 def approved_validation():
@@ -259,3 +264,156 @@ def test_expired_payment_is_blocked_before_reservation(monkeypatch):
     audit.assert_called_once()
     reserve.assert_not_called()
     submit.assert_not_called()
+
+
+# ---------------------------------------------------------
+# Validated XRPL ledger verification tests
+# ---------------------------------------------------------
+
+
+def ledger_response(
+    tx_hash="ABC123",
+    treasury="rTestTreasury",
+    supplier="rTestSupplier",
+    amount="10000000",
+    validated=True,
+    outcome="tesSUCCESS",
+):
+    response = MagicMock()
+    response.is_successful.return_value = True
+    response.result = {
+        "validated": validated,
+        "hash": tx_hash,
+        "tx_json": {
+            "TransactionType": "Payment",
+            "Account": treasury,
+            "Destination": supplier,
+            "Amount": amount,
+            "Memos": [
+                {
+                    "Memo": {
+                        "MemoData": "494E562D323032362D30303031",
+                    }
+                }
+            ],
+        },
+        "meta": {
+            "TransactionResult": outcome,
+        },
+    }
+    return response
+
+
+def configure_ledger_environment(monkeypatch):
+    monkeypatch.setenv("DEMO_TREASURY_ADDRESS", "rTestTreasury")
+    monkeypatch.setenv("HONEST_SUPPLIER_ADDRESS", "rTestSupplier")
+
+
+def test_validated_ledger_payment_is_accepted(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response()
+
+    result = check_validated_payment(client, "ABC123")
+
+    assert result == "tesSUCCESS"
+    client.request.assert_called_once()
+
+
+def test_unvalidated_ledger_payment_is_not_accepted(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response(validated=False)
+
+    result = check_validated_payment(client, "ABC123")
+
+    assert result is None
+
+
+def test_wrong_payment_destination_is_rejected(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response(
+        supplier="rWrongSupplier"
+    )
+
+    with pytest.raises(ValueError, match="destination"):
+        check_validated_payment(client, "ABC123")
+
+
+def test_wrong_payment_amount_is_rejected(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response(
+        amount="20000000"
+    )
+
+    with pytest.raises(ValueError, match="amount"):
+        check_validated_payment(client, "ABC123")
+
+
+def test_wrong_transaction_hash_is_rejected(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response(
+        tx_hash="WRONG_HASH"
+    )
+
+    with pytest.raises(ValueError, match="hash"):
+        check_validated_payment(client, "ABC123")
+
+
+def test_failed_ledger_result_is_not_success(monkeypatch):
+    configure_ledger_environment(monkeypatch)
+
+    client = MagicMock()
+    client.request.return_value = ledger_response(
+        outcome="tecUNFUNDED_PAYMENT"
+    )
+
+    result = check_validated_payment(client, "ABC123")
+
+    assert result == "tecUNFUNDED_PAYMENT"
+    assert result != "tesSUCCESS"
+
+
+def test_correct_invoice_memo_is_accepted():
+    transaction = {
+        "Memos": [{"Memo": {"MemoData": "494E562D323032362D30303031"}}]
+    }
+    assert verify_invoice_memo(transaction) is None
+
+
+def test_missing_invoice_memo_is_rejected():
+    with pytest.raises(ValueError, match="memo"):
+        verify_invoice_memo({})
+
+
+def test_wrong_invoice_memo_is_rejected():
+    transaction = {
+        "Memos": [{"Memo": {"MemoData": "494E562D323032362D39393939"}}]
+    }
+    with pytest.raises(ValueError, match="Invoice memo mismatch"):
+        verify_invoice_memo(transaction)
+
+
+def test_invalid_invoice_memo_encoding_is_rejected():
+    transaction = {"Memos": [{"Memo": {"MemoData": "NOT_HEX"}}]}
+    with pytest.raises(ValueError, match="encoding"):
+        verify_invoice_memo(transaction)
+
+
+def test_multiple_invoice_memos_are_rejected():
+    transaction = {
+        "Memos": [
+            {"Memo": {"MemoData": "494E562D323032362D30303031"}},
+            {"Memo": {"MemoData": "494E562D323032362D30303031"}},
+        ]
+    }
+    with pytest.raises(ValueError, match="memo"):
+        verify_invoice_memo(transaction)
