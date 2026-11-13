@@ -162,3 +162,12 @@ def test_parse_ledger_payments_keeps_only_successful_treasury_invoice_payments()
     assert rows[0]["supplier"] == "Honest Supplies (Pty) Ltd"
     assert rows[0]["zar"] == Decimal("15000")
     assert rows[0]["multisigned"] is True
+
+
+def test_ledger_supplier_name_comes_from_invoice_register_when_wallets_are_shared():
+    memo = [{"Memo": {"MemoType": "696E766F696365", "MemoData": b"INV-2026-0003".hex().upper()}}]
+    entry = {"tx_json": {"TransactionType": "Payment", "Account": "rT", "Destination": "rShared", "Memos": memo},
+             "meta": {"TransactionResult": "tesSUCCESS", "delivered_amount": "8333333"}, "hash": "H"}
+    rows = core.parse_ledger_payments([entry], "rT", {"rShared": "Honest Supplies (Pty) Ltd"},
+                                      core.invoice_supplier_names())
+    assert rows[0]["supplier"] == "Mangaung Office Solutions"

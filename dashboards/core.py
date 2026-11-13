@@ -335,6 +335,21 @@ def supplier_wallets(path: Path | None = None) -> dict[str, str]:
     return out
 
 
+def invoice_supplier_names(invoices_path: Path | None = None, suppliers_path: Path | None = None) -> dict[str, str]:
+    """invoice number -> registered supplier name, from the invoice register.
+
+    More reliable than looking up the wallet: two suppliers may share a wallet.
+    """
+    invoices_path = invoices_path or (DATA_DIR / "invoices.json")
+    try:
+        invoices = json.loads(invoices_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    names = load_suppliers(suppliers_path)
+    return {number: names.get(entry.get("supplier_id", ""), entry.get("supplier_id", ""))
+            for number, entry in invoices.items() if not number.startswith("_") and isinstance(entry, dict)}
+
+
 def _memo_invoice(tx: dict) -> str | None:
     for item in tx.get("Memos") or []:
         memo = item.get("Memo", {}) if isinstance(item, dict) else {}
@@ -347,12 +362,15 @@ def _memo_invoice(tx: dict) -> str | None:
 
 
 def parse_ledger_payments(transactions: list[dict], treasury: str,
-                          wallet_names: dict[str, str] | None = None) -> list[dict]:
+                          wallet_names: dict[str, str] | None = None,
+                          invoice_names: dict[str, str] | None = None) -> list[dict]:
     """Successful Treasury payments that carry an invoice memo, newest first.
 
     `transactions` is the `transactions` list from an XRPL account_tx response.
+    The supplier name comes from the invoice register first, then the wallet.
     """
     wallet_names = wallet_names or {}
+    invoice_names = invoice_names or {}
     rows = []
     for entry in transactions:
         tx = entry.get("tx_json") or entry.get("tx") or {}
@@ -372,7 +390,7 @@ def parse_ledger_payments(transactions: list[dict], treasury: str,
         rows.append({
             "timestamp": entry.get("close_time_iso"),
             "invoice_number": invoice,
-            "supplier": wallet_names.get(destination, destination),
+            "supplier": invoice_names.get(invoice) or wallet_names.get(destination, destination),
             "destination": destination,
             "xrp": xrp,
             "zar": xrp * DEMO_ZAR_PER_XRP,

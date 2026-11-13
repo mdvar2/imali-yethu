@@ -21,7 +21,7 @@ South African municipalities carry a national balance of **R268 billion** in una
 | Supplier wallet taken from the register, never from the invoice | ✅ Working | `data/suppliers.json` |
 | Independent rules server: approved suppliers, invoice register, per-payment limit, weekly cap, single-use invoices | ✅ Working | `rules_server/` |
 | Rules server checks the **exact** transaction (wallet, amount, memo, fee, flags) before signing | ✅ Working | `rules_server/xrpl_verification.py` |
-| **XRPL multisig**: rules server co-signs only after every check passes | ✅ Built and tested · activate on Testnet with `scripts/setup_multisig.py` | `POST /cosign`, `agent/xrpl_payments.py` |
+| **XRPL multisig**: rules server co-signs only after every check passes | ✅ **Live on Testnet**, Treasury master key disabled (see Testnet proof) | `POST /cosign`, `agent/xrpl_payments.py` |
 | CFO limits and kill switch, held by the rules server (agent cannot reach them) | ✅ Working | `GET/PUT /policy`, `POST /pause` |
 | Dashboard: submit invoices, decision trail, payments register, controls, staff sign-in | ✅ Working | `dashboards/app.py` |
 | Public transparency page read **live from the XRP Ledger** | ✅ Working | `dashboards/app.py` |
@@ -146,9 +146,23 @@ Rigged tender decisions before the payment stage, cash bribes, and false ownersh
 
 ## Testnet proof
 
+Treasury: [`rBuepf14KHmh3kf5xnMfG9G4MbM62CRbHL`](https://testnet.xrpl.org/accounts/rBuepf14KHmh3kf5xnMfG9G4MbM62CRbHL)
+
 | Step | Transaction |
 | --- | --- |
 | First payment (Treasury → Honest Supplier, 10 XRP, memo INV-2026-0001) | [7E5179…AEC57](https://testnet.xrpl.org/transactions/7E5179129DA1FB6847C7ADA11A49E3EEB65691EDE8F2D56CE5F56B68242AEC57) |
+| Treasury signer list set: agent 1, rules server 2, CFO 1, Municipal Manager 1, quorum 3 | [BEBFEA…23D11](https://testnet.xrpl.org/transactions/BEBFEA240F94F4F9DFAC9B2375C109FF777ECC156AA2B965382FB9B903E23D11) |
+| **Multisigned payment**, signed by AI agent + rules server (INV-2026-0003, 8.33 XRP) | [0D2A1D…29993](https://testnet.xrpl.org/transactions/0D2A1DD6CBB746942F9411793278DCED932BD5E748F1C430A4F087CF9D529993) |
+| Treasury master key disabled | [F7689E…10CA5](https://testnet.xrpl.org/transactions/F7689E8D05A90C195F0FC565A9951E38E8734CD5340F8589000BCF32D6610CA5) |
+
+After the master key was disabled, two attacks were tried against Testnet and **rejected by the ledger itself**:
+
+| Attempt | Ledger result |
+| --- | --- |
+| Pay with the old Treasury master key (e.g. a stolen seed) | `tefMASTER_DISABLED` |
+| A hacked agent signs alone, skipping the rules server | `tefBAD_QUORUM` |
+
+Since the master key is disabled, `scripts/first_payment.py` no longer works. All payments go through the agent and the rules server. `scripts/emergency_restore_master.py` re-enables the master key with CFO + Municipal Manager + agent signatures.
 
 ## Repository structure
 
@@ -159,7 +173,7 @@ imali-yethu/
 ├── dashboards/     # Streamlit dashboard (app.py) and its theme and data helpers
 ├── data/           # sample suppliers, invoice register, prices, sample invoices
 ├── scripts/        # wallet, multisig and demo-reset scripts
-└── tests/          # 96 tests: agent, rules server, co-signing, dashboard
+└── tests/          # 97 tests: agent, rules server, co-signing, dashboard
 ```
 
 ## Team

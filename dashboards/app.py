@@ -75,7 +75,8 @@ def ledger_payments(treasury: str) -> list[dict] | None:
 
         client = JsonRpcClient(os.environ["XRPL_RPC_URL"])
         result = client.request(AccountTx(account=treasury, limit=200)).result
-        return core.parse_ledger_payments(result.get("transactions", []), treasury, core.supplier_wallets())
+        return core.parse_ledger_payments(result.get("transactions", []), treasury,
+                                          core.supplier_wallets(), core.invoice_supplier_names())
     except Exception:  # network problems: the page falls back to the local record
         return None
 
