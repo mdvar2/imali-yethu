@@ -23,6 +23,9 @@ from rules_server.cosigning import (
 from rules_server.transaction_freshness import (
     verify_transaction_freshness,
 )
+from decimal import Decimal
+from rules_server.spending_policy import check_spending_limit
+from decimal import Decimal
 
 INVOICE = "INV-2026-0001"
 SUPPLIER_ID = "SUP-001"
@@ -286,6 +289,34 @@ def execute_agent_payment(
         return {
             "approved": False,
             "reasons": [reason],
+        }
+
+    # Enforce the independent spending policy before reserving,
+    # cosigning or submitting any XRPL transaction.
+    try:
+        spending_check = check_spending_limit(
+            Decimal(INVOICE_AMOUNT)
+        )
+    except Exception:
+        record_audit(
+            INVOICE,
+            "BLOCKED",
+            "Spending policy unavailable",
+        )
+        return {
+            "approved": False,
+            "reasons": ["Spending policy unavailable"],
+        }
+
+    if not spending_check["approved"]:
+        record_audit(
+            INVOICE,
+            "BLOCKED",
+            "; ".join(spending_check["reasons"]),
+        )
+        return {
+            "approved": False,
+            "reasons": spending_check["reasons"],
         }
 
     reservation = authorize_invoice(

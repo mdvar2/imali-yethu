@@ -10,6 +10,10 @@ from rules_server.authorization import authorize_invoice
 from decimal import Decimal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
+from rules_server.spending_policy import (
+    get_spending_limit,
+    set_spending_limit,
+)
 
 from pathlib import Path
 
@@ -32,7 +36,6 @@ app = FastAPI(title="Imali Yethu Rules Server")
 # Production policies must be stored securely and managed
 # by authorised human operators, never by the AI agent.
 APPROVED_SUPPLIERS = {"SUP-001", "SUP-002"}
-MAX_PAYMENT = Decimal("50000.00")
 APPROVED_INVOICES = {
     "INV-2026-0001": {
         "supplier_id": "SUP-001",
@@ -67,6 +70,53 @@ def require_service_key(
         )
 
 
+
+class SpendingLimitUpdate(BaseModel):
+    max_payment: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+
+
+def require_admin_key(
+    x_admin_key: str | None = Header(default=None),
+):
+    expected = os.getenv("RULES_ADMIN_API_KEY")
+    service_key = os.getenv("RULES_SERVER_API_KEY")
+
+    if not expected or not service_key or expected == service_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Independent administrator authentication is unavailable",
+        )
+
+    if not x_admin_key or not secrets.compare_digest(
+        x_admin_key, expected
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid administrator credentials",
+        )
+
+
+@app.get(
+    "/admin/spending-limit",
+    dependencies=[Depends(require_admin_key)],
+)
+def read_spending_limit():
+    return {"max_payment": str(get_spending_limit())}
+
+
+@app.put(
+    "/admin/spending-limit",
+    dependencies=[Depends(require_admin_key)],
+)
+def update_spending_limit(request: SpendingLimitUpdate):
+    limit = set_spending_limit(request.max_payment)
+
+    return {
+        "updated": True,
+        "max_payment": str(limit),
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "rules-server"}
@@ -79,7 +129,7 @@ def validate_payment(payment: PaymentRequest):
     if payment.supplier_id not in APPROVED_SUPPLIERS:
         reasons.append("Supplier is not approved")
 
-    if payment.amount > MAX_PAYMENT:
+    if payment.amount > get_spending_limit():
         reasons.append("Payment exceeds the spending limit")
 
     invoice = APPROVED_INVOICES.get(payment.invoice_number)
