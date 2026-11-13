@@ -17,3 +17,7 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Agent run logs (local only)
+data/payments.jsonl
+data/agent_control.json
