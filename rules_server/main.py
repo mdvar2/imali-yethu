@@ -3,10 +3,9 @@ import secrets
 
 from rules_server.cosigning import validate_agent_payment
 from dotenv import load_dotenv
-from rules_server.authorization import authorize_invoice
+from rules_server.authorization import authorize_invoice, list_payment_history
 from rules_server.xrpl_verification import verify_xrpl_transaction
 from fastapi import Depends, Header, HTTPException
-from rules_server.authorization import authorize_invoice
 from decimal import Decimal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -114,6 +113,16 @@ def update_spending_limit(request: SpendingLimitUpdate):
     return {
         "updated": True,
         "max_payment": str(limit),
+    }
+
+
+@app.get(
+    "/admin/payment-history",
+    dependencies=[Depends(require_admin_key)],
+)
+def read_payment_history():
+    return {
+        "payments": list_payment_history(limit=100),
     }
 
 
