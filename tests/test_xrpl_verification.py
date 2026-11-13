@@ -124,3 +124,61 @@ def test_additional_memo_rejected():
 
     response = verify(transaction)
     assert response.json()["verified"] is False
+
+
+def prepared_transaction():
+    transaction = valid_transaction()
+    transaction.update({
+        "Fee": "30",
+        "Sequence": 5,
+        "LastLedgerSequence": 90000000,
+        "SigningPubKey": "",
+        "Flags": 0,
+    })
+    return transaction
+
+
+def test_prepared_multisign_transaction():
+    response = verify(prepared_transaction())
+    assert response.status_code == 200
+    assert response.json()["verified"] is True
+
+
+def test_excessive_fee_rejected():
+    transaction = prepared_transaction()
+    transaction["Fee"] = "1000000"
+
+    response = verify(transaction)
+    assert response.json()["verified"] is False
+
+
+def test_single_signing_key_rejected():
+    transaction = prepared_transaction()
+    transaction["SigningPubKey"] = "ABCDEF"
+
+    response = verify(transaction)
+    assert response.json()["verified"] is False
+
+
+def test_payment_flags_rejected():
+    transaction = prepared_transaction()
+    transaction["Flags"] = 2147483648
+
+    response = verify(transaction)
+    assert response.json()["verified"] is False
+
+
+def test_deliver_min_rejected():
+    transaction = prepared_transaction()
+    transaction["DeliverMin"] = "1"
+
+    response = verify(transaction)
+    assert response.json()["verified"] is False
+
+
+def test_missing_prepared_field_rejected():
+    transaction = prepared_transaction()
+    del transaction["LastLedgerSequence"]
+
+    response = verify(transaction)
+    assert response.json()["verified"] is False
