@@ -25,7 +25,7 @@ python -m agent.run_agent data/sample_invoices/hacked.txt              # blocked
 python -m agent.run_agent data/sample_invoices/hacked.txt --simulate-compromised
 #   ^ agent is "fooled" and tries to pay the fake supplier; the rules server blocks it
 
-streamlit run dashboards/agent_dashboard.py          # CFO view, pause switch, limits
+streamlit run dashboards/app.py                      # dashboard: submit invoices, oversight, controls
 ```
 
 ## Notes

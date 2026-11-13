@@ -20,7 +20,13 @@ from dotenv import load_dotenv
 from agent.invoice_reader import read_invoice
 from agent.price_check import check_prices
 from agent.rules_client import RulesServerClient
-from agent.xrpl_payments import TESTNET_EXPLORER, build_payment, submit_payment, zar_to_drops
+from agent.xrpl_payments import (
+    TESTNET_EXPLORER,
+    CosignRefused,
+    build_payment,
+    submit_payment,
+    zar_to_drops,
+)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 LOG_PATH = DATA_DIR / "payments.jsonl"
@@ -46,7 +52,7 @@ def run_invoice(
     *,
     reader=read_invoice,
     rules: RulesServerClient | None = None,
-    submitter=submit_payment,
+    submitter=None,
     submit: bool = False,
     simulate_compromised: bool = False,
 ) -> dict:
@@ -115,17 +121,22 @@ def run_invoice(
     if not verification.get("verified"):
         return finish("blocked_by_rules_server", verification.get("reasons", []))
 
+    # A dry run stops here, so it never uses up the invoice's single approval.
+    if not submit:
+        return finish("approved_dry_run")
+
+    # 5. Reserve the invoice (single use), then sign and submit.
+    #    In multisig mode the rules server co-signs only reserved invoices.
     authorization = rules.authorize_payment(invoice.invoice_number, invoice.supplier_id, str(amount_zar))
     if not authorization.get("authorized"):
         reason = authorization.get("reason") or "; ".join(authorization.get("reasons", []))
         return finish("blocked_by_rules_server", [reason])
 
-    # 5. Submit
-    if not submit:
-        return finish("approved_dry_run")
-
+    submitter = submitter or (lambda tx_json: submit_payment(tx_json, rules=rules))
     try:
         result_code, tx_hash = submitter(tx)
+    except CosignRefused as exc:
+        return finish("blocked_by_rules_server", [str(exc)])
     except Exception as exc:  # network, signing, ledger errors
         return finish("failed", [f"{type(exc).__name__}: {exc}"])
 

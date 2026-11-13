@@ -1,0 +1,7 @@
+{
+  "_note": "SAMPLE register of invoices raised against approved purchase orders. The rules server only approves invoices listed here, for exactly this supplier and amount.",
+  "INV-2026-0001": {"supplier_id": "SUP-001", "amount_zar": "15000.00", "purchase_order": "PO-2026-0412", "description": "1 x laptop, Finance department"},
+  "INV-2026-0002": {"supplier_id": "SUP-001", "amount_zar": "15000.00", "purchase_order": "PO-2026-0413", "description": "1 x laptop, Technical services"},
+  "INV-2026-0003": {"supplier_id": "SUP-002", "amount_zar": "12500.00", "purchase_order": "PO-2026-0420", "description": "5 x ergonomic office chairs, Library"},
+  "INV-2026-0004": {"supplier_id": "SUP-002", "amount_zar": "12000.00", "purchase_order": "PO-2026-0421", "description": "10 x toner cartridges, Municipal offices"}
+}

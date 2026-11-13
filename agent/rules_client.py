@@ -35,3 +35,6 @@ class RulesServerClient:
             "supplier_id": supplier_id,
             "amount": amount_zar,
         })
+
+    def cosign(self, tx_json: dict) -> dict:
+        return self._post("/cosign", {"tx_json": tx_json})

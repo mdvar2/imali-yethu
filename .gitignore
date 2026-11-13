@@ -21,3 +21,8 @@ venv/
 # Agent run logs (local only)
 data/payments.jsonl
 data/agent_control.json
+
+# Dashboard audit trail (local only)
+data/dashboard_audit.jsonl
+data/policy.json
+data/policy_audit.jsonl

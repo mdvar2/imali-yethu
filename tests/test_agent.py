@@ -60,7 +60,11 @@ def run(inv, **kwargs):
 
 def test_zar_to_drops_matches_rules_server_policy():
     from decimal import Decimal
+
+    from rules_server import registers
     assert zar_to_drops(Decimal("15000.00")) == "10000000"
+    for amount in ("15000.00", "12500.00", "12000.00", "0.01"):
+        assert zar_to_drops(Decimal(amount)) == registers.zar_to_drops(Decimal(amount))
 
 
 def test_price_check_blocks_inflated_price():
@@ -108,11 +112,42 @@ def test_compromised_agent_blocked_by_rules_server():
     assert "Supplier destination mismatch" in record["reasons"]
 
 
+def fake_submit(tx):
+    return "tesSUCCESS", "ABC123"
+
+
 def test_duplicate_invoice_blocked_by_rules_server():
-    assert run(invoice())["status"] == "approved_dry_run"
-    second = run(invoice())
+    assert run(invoice(), submit=True, submitter=fake_submit)["status"] == "paid"
+    second = run(invoice(), submit=True, submitter=fake_submit)
     assert second["status"] == "blocked_by_rules_server"
     assert "already reserved" in second["reasons"][0]
+
+
+def test_dry_run_does_not_use_up_the_invoice():
+    assert run(invoice())["status"] == "approved_dry_run"
+    assert run(invoice(), submit=True, submitter=fake_submit)["status"] == "paid"
+
+
+def test_second_registered_invoice_from_other_supplier_is_paid():
+    inv = Invoice(invoice_number="INV-2026-0003", supplier_name="Mangaung Office Solutions",
+                  supplier_id="SUP-002",
+                  line_items=[LineItem(description="Ergonomic office chair", catalog_item="office_chair_ergonomic",
+                                       quantity=5, unit_price_zar=2500.0)],
+                  total_zar=12500.0, embedded_instructions=[])
+    record = run(inv, submit=True, submitter=fake_submit)
+    assert record["status"] == "paid", record["reasons"]
+    assert record["amount_drops"] == "8333333"
+
+
+def test_cosign_refusal_is_reported_as_rules_server_block():
+    from agent.xrpl_payments import CosignRefused
+
+    def refuse(tx):
+        raise CosignRefused("Payments are paused by the CFO")
+
+    record = run(invoice(), submit=True, submitter=refuse)
+    assert record["status"] == "blocked_by_rules_server"
+    assert record["reasons"] == ["Payments are paused by the CFO"]
 
 
 def test_paused_agent_does_nothing():
