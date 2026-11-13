@@ -2,7 +2,7 @@
 .env
 *.env
 !.env.example
-
+config/*.env
 # Python
 __pycache__/
 *.pyc
@@ -17,3 +17,6 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+config/agent.env
+config/rules_server.env

@@ -1,6 +1,7 @@
 import os
 import secrets
 
+from rules_server.cosigning import validate_agent_payment
 from dotenv import load_dotenv
 from rules_server.authorization import authorize_invoice
 from rules_server.xrpl_verification import verify_xrpl_transaction
@@ -113,4 +114,11 @@ def authorize_payment(payment: PaymentRequest):
 )
 def verify_transaction(transaction: dict):
     return verify_xrpl_transaction(transaction)
+
+@app.post(
+    "/validate-agent-payment",
+    dependencies=[Depends(require_service_key)],
+)
+def validate_agent_transaction(transaction: dict):
+    return validate_agent_payment(transaction)
 
