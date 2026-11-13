@@ -11,7 +11,20 @@ from decimal import Decimal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-load_dotenv()
+from pathlib import Path
+
+RULES_ENV = (
+    Path(__file__).resolve().parent.parent
+    / "config"
+    / "rules_server.env"
+)
+
+if not RULES_ENV.is_file():
+    raise RuntimeError(
+        "Missing config/rules_server.env"
+    )
+
+load_dotenv(dotenv_path=RULES_ENV, override=False)
 
 app = FastAPI(title="Imali Yethu Rules Server")
 
