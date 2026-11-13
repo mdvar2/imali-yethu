@@ -20,6 +20,9 @@ from rules_server.cosigning import (
     prepare_cosigned_payment,
     validate_agent_payment,
 )
+from rules_server.transaction_freshness import (
+    verify_transaction_freshness,
+)
 
 INVOICE = "INV-2026-0001"
 SUPPLIER_ID = "SUP-001"
@@ -33,6 +36,7 @@ def transaction_hash(blob: str) -> str:
 
 
 def check_treasury_signers(client):
+    """Verify the expected Treasury multisigning configuration."""
     treasury = os.environ["DEMO_TREASURY_ADDRESS"]
     agent = os.environ["AGENT_ADDRESS"]
     rules = Wallet.from_seed(os.environ["RULES_SERVER_SEED"])
@@ -82,9 +86,7 @@ def check_treasury_signers(client):
 
 
 def submit_signed_blob(client, blob):
-    """Submit the exact signed transaction blob."""
-
-
+    """Submit the exact signed transaction blob without modifying it."""
     return client.request(
         SubmitOnly(
             tx_blob=blob,
@@ -94,7 +96,7 @@ def submit_signed_blob(client, blob):
 
 
 def check_validated_payment(client, tx_hash):
-    """Check whether the transaction is validated on-ledger."""
+    """Check whether the transaction is validated on the ledger."""
     response = client.request(
         Tx(transaction=tx_hash, binary=False)
     )
@@ -108,6 +110,7 @@ def check_validated_payment(client, tx_hash):
         return None
 
     meta = result.get("meta", {})
+
     outcome = (
         meta.get("TransactionResult")
         if isinstance(meta, dict)
@@ -120,6 +123,9 @@ def check_validated_payment(client, tx_hash):
 def execute_agent_payment(
     transaction: dict[str, Any],
 ) -> dict[str, Any]:
+    """Validate, cosign, submit and verify an agent payment."""
+
+    # 1. Validate the agent signature and payment policy.
     validation = validate_agent_payment(transaction)
 
     if not validation["approved"]:
@@ -133,6 +139,7 @@ def execute_agent_payment(
             "reasons": validation["reasons"],
         }
 
+    # 2. Require explicit permission for live Testnet execution.
     if os.getenv("ENABLE_TESTNET_PAYMENTS") != "true":
         return {
             "approved": False,
@@ -141,6 +148,7 @@ def execute_agent_payment(
 
     client = JsonRpcClient(os.environ["XRPL_RPC_URL"])
 
+    # 3. Verify the Treasury signer list.
     try:
         check_treasury_signers(client)
     except Exception:
@@ -154,6 +162,30 @@ def execute_agent_payment(
             "reasons": ["Treasury signer verification failed"],
         }
 
+    # 4. Verify the transaction sequence and ledger expiry.
+    # This must happen BEFORE reserving the invoice.
+    try:
+        fresh, reason = verify_transaction_freshness(
+            client,
+            transaction,
+            os.environ["DEMO_TREASURY_ADDRESS"],
+        )
+    except Exception:
+        fresh = False
+        reason = "Ledger freshness verification failed"
+
+    if not fresh:
+        record_audit(
+            INVOICE,
+            "BLOCKED",
+            reason,
+        )
+        return {
+            "approved": False,
+            "reasons": [reason],
+        }
+
+    # 5. Reserve the invoice to prevent duplicate submissions.
     reservation = authorize_invoice(
         invoice_number=INVOICE,
         supplier_id=SUPPLIER_ID,
@@ -169,6 +201,7 @@ def execute_agent_payment(
     tx_hash = None
 
     try:
+        # 6. Add the Rules Server signature.
         prepared = prepare_cosigned_payment(transaction)
 
         if not prepared["approved"]:
@@ -178,19 +211,22 @@ def execute_agent_payment(
                 "reasons": prepared["reasons"],
             }
 
+        # 7. Encode the exact multisigned transaction.
         blob = encode(prepared["transaction"])
         tx_hash = transaction_hash(blob)
 
+        # 8. Record the transaction before broadcasting.
         update_payment_status(
             INVOICE,
             "submitting",
             tx_hash,
         )
 
-        response = submit_signed_blob(client, blob)
+        # 9. Submit the signed blob to XRPL Testnet.
+        submit_signed_blob(client, blob)
 
+        # 10. Confirm the result on the validated ledger.
         # A submission response alone is not proof of settlement.
-        # Poll the validated ledger for a bounded period.
         for _ in range(12):
             outcome = check_validated_payment(client, tx_hash)
 
@@ -222,6 +258,7 @@ def execute_agent_payment(
 
             time.sleep(2)
 
+        # 11. An unconfirmed outcome must not trigger a retry.
         record_audit(
             INVOICE,
             "RECONCILIATION_REQUIRED",
