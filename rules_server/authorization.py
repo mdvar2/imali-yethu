@@ -212,3 +212,65 @@ def get_payment_audit(invoice_number: str):
         }
         for row in rows
     ]
+
+
+def list_payment_history(limit: int = 100) -> list[dict]:
+    """Return recent invoice records with their payment audit events."""
+
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError("Invalid history limit")
+
+    if not 1 <= limit <= 100:
+        raise ValueError("History limit must be between 1 and 100")
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                invoice_number,
+                supplier_id,
+                amount,
+                status
+            FROM authorizations
+            ORDER BY rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        history = []
+
+        for invoice_number, supplier_id, amount, status in rows:
+            events = conn.execute(
+                """
+                SELECT
+                    event_type,
+                    reason,
+                    transaction_hash,
+                    created_at
+                FROM payment_audit
+                WHERE invoice_number = ?
+                ORDER BY id ASC
+                """,
+                (invoice_number,),
+            ).fetchall()
+
+            history.append(
+                {
+                    "invoice_number": invoice_number,
+                    "supplier_id": supplier_id,
+                    "amount": amount,
+                    "status": status,
+                    "events": [
+                        {
+                            "event_type": event[0],
+                            "reason": event[1],
+                            "transaction_hash": event[2],
+                            "created_at": event[3],
+                        }
+                        for event in events
+                    ],
+                }
+            )
+
+    return history
