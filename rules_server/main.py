@@ -135,3 +135,13 @@ def verify_transaction(transaction: dict):
 def validate_agent_transaction(transaction: dict):
     return validate_agent_payment(transaction)
 
+
+from rules_server.execution import execute_agent_payment
+
+
+@app.post(
+    "/cosign",
+    dependencies=[Depends(require_service_key)],
+)
+def cosign_agent_payment(transaction: dict):
+    return execute_agent_payment(transaction)
