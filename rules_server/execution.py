@@ -27,8 +27,6 @@ from rules_server.transaction_freshness import (
 INVOICE = "INV-2026-0001"
 SUPPLIER_ID = "SUP-001"
 INVOICE_AMOUNT = "15000.00"
-
-# 10 XRP expressed in drops, for Testnet demonstration only.
 PAYMENT_AMOUNT_DROPS = "10000000"
 
 
@@ -89,7 +87,7 @@ def check_treasury_signers(client):
 
 
 def submit_signed_blob(client, blob):
-    """Submit the exact signed transaction blob without modifying it."""
+    """Submit the exact signed transaction without modifying it."""
     return client.request(
         SubmitOnly(
             tx_blob=blob,
@@ -98,9 +96,36 @@ def submit_signed_blob(client, blob):
     )
 
 
+def inspect_submission_response(response):
+    """Classify the preliminary XRPL submission response.
+
+    This is not a settlement decision. Even tesSUCCESS must
+    be confirmed independently on the validated ledger.
+    """
+    result = getattr(response, "result", None)
+
+    if not isinstance(result, dict):
+        return "unknown", "Missing XRPL submission response"
+
+    engine_result = result.get("engine_result")
+
+    if not isinstance(engine_result, str) or not engine_result:
+        return "unknown", "Missing XRPL engine result"
+
+    if engine_result == "tesSUCCESS":
+        return "provisional", engine_result
+
+    if engine_result.startswith("ter"):
+        return "provisional", engine_result
+
+    if engine_result.startswith(("tec", "tem", "tef", "tel")):
+        return "rejected", engine_result
+
+    return "unknown", engine_result
+
+
 def verify_invoice_memo(transaction):
     """Verify that the payment contains the expected invoice memo."""
-
     memos = transaction.get("Memos")
 
     if not isinstance(memos, list) or len(memos) != 1:
@@ -131,8 +156,7 @@ def verify_invoice_memo(transaction):
 
 
 def check_validated_payment(client, tx_hash):
-    """Verify the exact intended payment on the validated XRPL ledger."""
-
+    """Verify the intended payment on the validated XRPL ledger."""
     response = client.request(
         Tx(transaction=tx_hash, binary=False)
     )
@@ -144,9 +168,6 @@ def check_validated_payment(client, tx_hash):
 
     if result.get("validated") is not True:
         return None
-
-    expected_treasury = os.environ["DEMO_TREASURY_ADDRESS"]
-    expected_supplier = os.environ["HONEST_SUPPLIER_ADDRESS"]
 
     transaction = result.get("tx_json", result)
 
@@ -161,16 +182,36 @@ def check_validated_payment(client, tx_hash):
     if transaction.get("TransactionType") != "Payment":
         raise ValueError("Unexpected transaction type")
 
-    if transaction.get("Account") != expected_treasury:
+    if transaction.get("Account") != os.environ["DEMO_TREASURY_ADDRESS"]:
         raise ValueError("Unexpected Treasury account")
 
-    if transaction.get("Destination") != expected_supplier:
+    if transaction.get("Destination") != os.environ["HONEST_SUPPLIER_ADDRESS"]:
         raise ValueError("Unexpected payment destination")
 
-    if transaction.get("Amount") != PAYMENT_AMOUNT_DROPS:
+    # XRPL may return Amount or DeliverMax.
+    # If both are present, both must match the expected amount.
+    amount = transaction.get("Amount")
+    deliver_max = transaction.get("DeliverMax")
+
+    if amount is None and deliver_max is None:
+        raise ValueError("Missing payment amount")
+
+    if amount is not None and amount != PAYMENT_AMOUNT_DROPS:
         raise ValueError("Unexpected payment amount")
 
-    # Confirm that this payment belongs to our approved invoice.
+    if deliver_max is not None and deliver_max != PAYMENT_AMOUNT_DROPS:
+        raise ValueError("Unexpected payment amount")
+
+    # Reject transactions that enable partial payments.
+    flags = transaction.get("Flags", 0)
+
+    if (
+        not isinstance(flags, int)
+        or isinstance(flags, bool)
+        or flags & 0x00020000
+    ):
+        raise ValueError("Partial payment is not permitted")
+
     verify_invoice_memo(transaction)
 
     metadata = result.get("meta", {})
@@ -183,15 +224,19 @@ def check_validated_payment(client, tx_hash):
     if not isinstance(outcome, str):
         raise ValueError("Missing ledger transaction result")
 
+    # A successful transaction must deliver exactly 10 XRP.
+    if outcome == "tesSUCCESS":
+        if metadata.get("delivered_amount") != PAYMENT_AMOUNT_DROPS:
+            raise ValueError("Unexpected delivered payment amount")
+
     return outcome
 
 
 def execute_agent_payment(
     transaction: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate, cosign, submit and verify an agent payment."""
+    """Validate, cosign, submit and reconcile an agent payment."""
 
-    # 1. Validate the agent signature and payment policy.
     validation = validate_agent_payment(transaction)
 
     if not validation["approved"]:
@@ -205,7 +250,6 @@ def execute_agent_payment(
             "reasons": validation["reasons"],
         }
 
-    # 2. Require explicit permission for live Testnet execution.
     if os.getenv("ENABLE_TESTNET_PAYMENTS") != "true":
         return {
             "approved": False,
@@ -214,7 +258,6 @@ def execute_agent_payment(
 
     client = JsonRpcClient(os.environ["XRPL_RPC_URL"])
 
-    # 3. Verify the Treasury signer list.
     try:
         check_treasury_signers(client)
     except Exception:
@@ -228,8 +271,6 @@ def execute_agent_payment(
             "reasons": ["Treasury signer verification failed"],
         }
 
-    # 4. Verify the transaction sequence and ledger expiry.
-    # This must happen BEFORE reserving the invoice.
     try:
         fresh, reason = verify_transaction_freshness(
             client,
@@ -241,17 +282,12 @@ def execute_agent_payment(
         reason = "Ledger freshness verification failed"
 
     if not fresh:
-        record_audit(
-            INVOICE,
-            "BLOCKED",
-            reason,
-        )
+        record_audit(INVOICE, "BLOCKED", reason)
         return {
             "approved": False,
             "reasons": [reason],
         }
 
-    # 5. Reserve the invoice to prevent duplicate submissions.
     reservation = authorize_invoice(
         invoice_number=INVOICE,
         supplier_id=SUPPLIER_ID,
@@ -267,7 +303,6 @@ def execute_agent_payment(
     tx_hash = None
 
     try:
-        # 6. Add the Rules Server signature.
         prepared = prepare_cosigned_payment(transaction)
 
         if not prepared["approved"]:
@@ -277,22 +312,32 @@ def execute_agent_payment(
                 "reasons": prepared["reasons"],
             }
 
-        # 7. Encode the exact multisigned transaction.
         blob = encode(prepared["transaction"])
         tx_hash = transaction_hash(blob)
 
-        # 8. Record the transaction before broadcasting.
+        # Persist the transaction ID before network submission.
         update_payment_status(
             INVOICE,
             "submitting",
             tx_hash,
         )
 
-        # 9. Submit the signed blob to XRPL Testnet.
-        submit_signed_blob(client, blob)
+        # Submit exactly once. Never automatically resubmit.
+        response = submit_signed_blob(client, blob)
 
-        # 10. Confirm the result on the validated ledger.
-        # A submission response alone is not proof of settlement.
+        submission_status, engine_result = (
+            inspect_submission_response(response)
+        )
+
+        record_audit(
+            INVOICE,
+            "SUBMISSION_RESPONSE",
+            f"{submission_status}: {engine_result}",
+            tx_hash,
+        )
+
+        # The submission response is preliminary.
+        # Only validated ledger evidence confirms settlement.
         for _ in range(12):
             outcome = check_validated_payment(client, tx_hash)
 
@@ -306,6 +351,7 @@ def execute_agent_payment(
                     "approved": True,
                     "validated": True,
                     "transaction_hash": tx_hash,
+                    "submission_result": engine_result,
                 }
 
             if outcome is not None:
@@ -320,15 +366,20 @@ def execute_agent_payment(
                     "validated": True,
                     "transaction_hash": tx_hash,
                     "ledger_result": outcome,
+                    "submission_result": engine_result,
                 }
 
             time.sleep(2)
 
-        # 11. An unconfirmed outcome must not trigger a retry.
+        # Do not release the invoice reservation if the
+        # final ledger outcome remains unknown.
         record_audit(
             INVOICE,
             "RECONCILIATION_REQUIRED",
-            "Ledger confirmation timed out",
+            (
+                "No validated ledger outcome; "
+                f"submission result: {engine_result}"
+            ),
             tx_hash,
         )
 
@@ -336,7 +387,11 @@ def execute_agent_payment(
             "approved": False,
             "validated": False,
             "transaction_hash": tx_hash,
+            "submission_result": engine_result,
             "reconciliation_required": True,
+            "reasons": [
+                "Ledger outcome unconfirmed; do not retry"
+            ],
         }
 
     except Exception as exc:

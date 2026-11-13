@@ -299,6 +299,7 @@ def ledger_response(
         },
         "meta": {
             "TransactionResult": outcome,
+            "delivered_amount": amount,
         },
     }
     return response
