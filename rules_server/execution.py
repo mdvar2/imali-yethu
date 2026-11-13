@@ -1,13 +1,14 @@
 
-"""Controlled XRPL Testnet payment execution for Imali Yethu."""
+"""Guarded XRPL Testnet execution for Imali Yethu."""
 
+import hashlib
 import os
+import time
 from typing import Any
 
 from xrpl.clients import JsonRpcClient
-from xrpl.models.requests import AccountInfo
-from xrpl.models.transactions import Transaction
-from xrpl.transaction import submit_and_wait
+from xrpl.core.binarycodec import encode
+from xrpl.models.requests import AccountInfo, SubmitOnly, Tx
 from xrpl.wallet import Wallet
 
 from rules_server.authorization import (
@@ -22,20 +23,22 @@ from rules_server.cosigning import (
 
 INVOICE = "INV-2026-0001"
 SUPPLIER_ID = "SUP-001"
-APPROVED_INVOICE_AMOUNT = "15000.00"
+INVOICE_AMOUNT = "15000.00"
 
 
-def check_treasury_signers(client: JsonRpcClient) -> None:
-    """Require the expected two-signer quorum on the ledger."""
+def transaction_hash(blob: str) -> str:
+    """Compute the XRPL transaction ID from its signed blob."""
+    payload = bytes.fromhex("54584E00") + bytes.fromhex(blob)
+    return hashlib.sha512(payload).digest()[:32].hex().upper()
 
+
+def check_treasury_signers(client):
     treasury = os.environ["DEMO_TREASURY_ADDRESS"]
     agent = os.environ["AGENT_ADDRESS"]
-    rules_wallet = Wallet.from_seed(
-        os.environ["RULES_SERVER_SEED"]
-    )
+    rules = Wallet.from_seed(os.environ["RULES_SERVER_SEED"])
 
-    if agent == rules_wallet.address:
-        raise ValueError("Agent and Rules Server must differ")
+    if len({treasury, agent, rules.address}) != 3:
+        raise ValueError("Signing accounts must be distinct")
 
     response = client.request(
         AccountInfo(
@@ -46,20 +49,17 @@ def check_treasury_signers(client: JsonRpcClient) -> None:
     )
 
     if not response.is_successful():
-        raise RuntimeError("Treasury account lookup failed")
+        raise RuntimeError("Treasury lookup failed")
 
-    account_data = response.result.get("account_data", {})
+    result = response.result
+    account = result.get("account_data", {})
 
-    signer_lists = response.result.get("signer_lists")
-
+    signer_lists = result.get("signer_lists")
     if signer_lists is None:
-        signer_lists = account_data.get("signer_lists", [])
+        signer_lists = account.get("signer_lists", [])
 
-    if not isinstance(signer_lists, list):
-        raise ValueError("Invalid Treasury signer-list response")
-
-    if len(signer_lists) != 1:
-        raise ValueError("Expected one Treasury signer list")
+    if not isinstance(signer_lists, list) or len(signer_lists) != 1:
+        raise ValueError("Unexpected signer-list response")
 
     signer_list = signer_lists[0]
 
@@ -74,21 +74,52 @@ def check_treasury_signers(client: JsonRpcClient) -> None:
 
     expected = {
         agent: 1,
-        rules_wallet.address: 2,
+        rules.address: 2,
     }
 
     if actual != expected:
         raise ValueError("Treasury signer list mismatch")
 
 
+def submit_signed_blob(client, blob):
+    """Submit the exact signed transaction blob."""
+
+
+    return client.request(
+        SubmitOnly(
+            tx_blob=blob,
+            fail_hard=True,
+        )
+    )
+
+
+def check_validated_payment(client, tx_hash):
+    """Check whether the transaction is validated on-ledger."""
+    response = client.request(
+        Tx(transaction=tx_hash, binary=False)
+    )
+
+    if not response.is_successful():
+        return None
+
+    result = response.result
+
+    if result.get("validated") is not True:
+        return None
+
+    meta = result.get("meta", {})
+    outcome = (
+        meta.get("TransactionResult")
+        if isinstance(meta, dict)
+        else None
+    )
+
+    return outcome
+
+
 def execute_agent_payment(
     transaction: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate, reserve, cosign and submit one demo payment.
-
-    A reserved invoice is never automatically retried.
-    """
-
     validation = validate_agent_payment(transaction)
 
     if not validation["approved"]:
@@ -112,22 +143,21 @@ def execute_agent_payment(
 
     try:
         check_treasury_signers(client)
-    except (ValueError, RuntimeError, KeyError) as exc:
+    except Exception:
         record_audit(
             INVOICE,
             "BLOCKED",
-            f"Signer verification: {type(exc).__name__}",
+            "Treasury signer verification failed",
         )
         return {
             "approved": False,
             "reasons": ["Treasury signer verification failed"],
         }
 
-    # Reserve before creating the second signature.
     reservation = authorize_invoice(
         invoice_number=INVOICE,
         supplier_id=SUPPLIER_ID,
-        amount=APPROVED_INVOICE_AMOUNT,
+        amount=INVOICE_AMOUNT,
     )
 
     if not reservation["authorized"]:
@@ -136,8 +166,8 @@ def execute_agent_payment(
             "reasons": [reservation["reason"]],
         }
 
-    # From this point onward, failures require reconciliation.
-    # Do not automatically release the reservation.
+    tx_hash = None
+
     try:
         prepared = prepare_cosigned_payment(transaction)
 
@@ -148,51 +178,54 @@ def execute_agent_payment(
                 "reasons": prepared["reasons"],
             }
 
-        combined = Transaction.from_xrpl(
-            prepared["transaction"]
+        blob = encode(prepared["transaction"])
+        tx_hash = transaction_hash(blob)
+
+        update_payment_status(
+            INVOICE,
+            "submitting",
+            tx_hash,
         )
 
-        update_payment_status(INVOICE, "submitting")
+        response = submit_signed_blob(client, blob)
 
-        response = submit_and_wait(
-            combined,
-            client,
-            wallet=None,
-            autofill=False,
-            check_fee=True,
-        )
+        # A submission response alone is not proof of settlement.
+        # Poll the validated ledger for a bounded period.
+        for _ in range(12):
+            outcome = check_validated_payment(client, tx_hash)
 
-        result = response.result
-        tx_hash = result.get("hash") or result.get("tx_json", {}).get("hash")
-        validated = result.get("validated") is True
-        metadata = result.get("meta", {})
-        engine_result = (
-            metadata.get("TransactionResult")
-            if isinstance(metadata, dict)
-            else None
-        )
+            if outcome == "tesSUCCESS":
+                update_payment_status(
+                    INVOICE,
+                    "validated",
+                    tx_hash,
+                )
+                return {
+                    "approved": True,
+                    "validated": True,
+                    "transaction_hash": tx_hash,
+                }
 
-        if (
-            response.is_successful()
-            and validated
-            and engine_result == "tesSUCCESS"
-        ):
-            update_payment_status(
-                INVOICE,
-                "validated",
-                tx_hash,
-            )
-            return {
-                "approved": True,
-                "validated": True,
-                "transaction_hash": tx_hash,
-            }
+            if outcome is not None:
+                record_audit(
+                    INVOICE,
+                    "LEDGER_REJECTED",
+                    outcome,
+                    tx_hash,
+                )
+                return {
+                    "approved": False,
+                    "validated": True,
+                    "transaction_hash": tx_hash,
+                    "ledger_result": outcome,
+                }
 
-        # An unexpected response is not proof that payment failed.
+            time.sleep(2)
+
         record_audit(
             INVOICE,
             "RECONCILIATION_REQUIRED",
-            "Ledger result not confirmed as tesSUCCESS",
+            "Ledger confirmation timed out",
             tx_hash,
         )
 
@@ -204,16 +237,18 @@ def execute_agent_payment(
         }
 
     except Exception as exc:
-        # Do not expose exception details or signing material.
         record_audit(
             INVOICE,
             "RECONCILIATION_REQUIRED",
             f"Execution exception: {type(exc).__name__}",
+            tx_hash,
         )
+
         return {
             "approved": False,
+            "transaction_hash": tx_hash,
             "reconciliation_required": True,
             "reasons": [
-                "Execution outcome uncertain; inspect the ledger"
+                "Execution outcome uncertain; do not retry"
             ],
         }
