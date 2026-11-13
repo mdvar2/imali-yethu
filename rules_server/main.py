@@ -4,6 +4,7 @@ import secrets
 from rules_server.cosigning import validate_agent_payment
 from dotenv import load_dotenv
 from rules_server.authorization import authorize_invoice, list_payment_history
+from rules_server.public_transparency import list_public_payments
 from rules_server.xrpl_verification import verify_xrpl_transaction
 from fastapi import Depends, Header, HTTPException
 from decimal import Decimal
@@ -123,6 +124,22 @@ def update_spending_limit(request: SpendingLimitUpdate):
 def read_payment_history():
     return {
         "payments": list_payment_history(limit=100),
+    }
+
+
+@app.get("/public/payments")
+def read_public_payments(limit: int = 100):
+    """Return restricted demonstration payment records."""
+    if not 1 <= limit <= 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Limit must be between 1 and 100",
+        )
+
+    return {
+        "network": "XRPL Testnet",
+        "environment": "demonstration",
+        "payments": list_public_payments(limit=limit),
     }
 
 
