@@ -1,6 +1,7 @@
 import os
 import secrets
 
+from dotenv import load_dotenv
 from rules_server.authorization import authorize_invoice
 from rules_server.xrpl_verification import verify_xrpl_transaction
 from fastapi import Depends, Header, HTTPException
@@ -8,6 +9,8 @@ from rules_server.authorization import authorize_invoice
 from decimal import Decimal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 app = FastAPI(title="Imali Yethu Rules Server")
 
