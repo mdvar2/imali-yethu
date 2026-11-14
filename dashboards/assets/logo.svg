@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="232" height="40" viewBox="0 0 232 40">
+  <path d="M20 2 L35 8 V19 C35 28.5 28.6 35.4 20 38 C11.4 35.4 5 28.5 5 19 V8 Z" fill="#0F3D37" stroke="#C99A2E" stroke-width="2"/>
+  <path d="M12 17 H28 M13 17 V27 M17.5 17 V27 M22.5 17 V27 M27 17 V27 M11 28.5 H29 M20 10.5 L29 15 H11 Z" stroke="#FFFFFF" stroke-width="1.8" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="46" y="20" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#FFFFFF">Imali Yethu</text>
+  <text x="46" y="34" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="10.5" fill="#9FC2BA" letter-spacing=".3">Payment Integrity System</text>
+</svg>

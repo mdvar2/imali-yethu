@@ -1,0 +1,5 @@
+{
+  "_note": "SAMPLE supplier register. Wallet addresses are read from .env, never from invoices.",
+  "SUP-001": {"name": "Honest Supplies (Pty) Ltd", "wallet_env": "HONEST_SUPPLIER_ADDRESS"},
+  "SUP-002": {"name": "Mangaung Office Solutions", "wallet_env": "HONEST_SUPPLIER_ADDRESS"}
+}

@@ -1,48 +1,28 @@
-import os
+﻿import os
 import secrets
-
-from rules_server.cosigning import validate_agent_payment
-from dotenv import load_dotenv
-from rules_server.authorization import authorize_invoice, list_payment_history
-from rules_server.public_transparency import list_public_payments
-from rules_server.xrpl_verification import verify_xrpl_transaction
-from fastapi import Depends, Header, HTTPException
 from decimal import Decimal
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from rules_server.spending_policy import (
-    get_spending_limit,
-    set_spending_limit,
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from rules_server import policy
+from rules_server.authorization import (
+    authorize_invoice,
+    mark_signed,
+    release_signature,
+    reserved_total_last_7_days,
 )
+from rules_server.registers import load_invoices
+from rules_server.xrpl_verification import verify_xrpl_transaction
 
-from pathlib import Path
+load_dotenv()
 
-RULES_ENV = (
-    Path(__file__).resolve().parent.parent
-    / "config"
-    / "rules_server.env"
+app = FastAPI(
+    title="Imali Yethu Rules Server",
+    description="Independent co-signer: approves a payment only if every rule passes. "
+                "Spending limits are set by the CFO, never by the AI agent.",
 )
-
-if not RULES_ENV.is_file():
-    raise RuntimeError(
-        "Missing config/rules_server.env"
-    )
-
-load_dotenv(dotenv_path=RULES_ENV, override=False)
-
-app = FastAPI(title="Imali Yethu Rules Server")
-
-# Demonstration policy only.
-# Production policies must be stored securely and managed
-# by authorised human operators, never by the AI agent.
-APPROVED_SUPPLIERS = {"SUP-001", "SUP-002"}
-APPROVED_INVOICES = {
-    "INV-2026-0001": {
-        "supplier_id": "SUP-001",
-        "amount": Decimal("15000.00"),
-    }
-}
-
 
 class PaymentRequest(BaseModel):
     invoice_number: str
@@ -50,96 +30,71 @@ class PaymentRequest(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
 
 
-def require_service_key(
-    x_service_key: str | None = Header(default=None),
-):
-    expected_key = os.getenv("RULES_SERVER_API_KEY")
-
-    if not expected_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Rules server authentication is not configured",
-        )
-
-    if not x_service_key or not secrets.compare_digest(
-        x_service_key, expected_key
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid service credentials",
-        )
+class PauseRequest(BaseModel):
+    paused: bool
 
 
-
-class SpendingLimitUpdate(BaseModel):
-    max_payment: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-
-
-def require_admin_key(
-    x_admin_key: str | None = Header(default=None),
-):
-    expected = os.getenv("RULES_ADMIN_API_KEY")
-    service_key = os.getenv("RULES_SERVER_API_KEY")
-
-    if not expected or not service_key or expected == service_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Independent administrator authentication is unavailable",
-        )
-
-    if not x_admin_key or not secrets.compare_digest(
-        x_admin_key, expected
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid administrator credentials",
-        )
+class CosignRequest(BaseModel):
+    tx_json: dict
 
 
-@app.get(
-    "/admin/spending-limit",
-    dependencies=[Depends(require_admin_key)],
-)
-def read_spending_limit():
-    return {"max_payment": str(get_spending_limit())}
+class PolicyUpdate(BaseModel):
+    max_payment_zar: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    weekly_cap_zar: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    approved_suppliers: list[str] = Field(max_length=500)
+
+    @field_validator("approved_suppliers")
+    @classmethod
+    def clean_suppliers(cls, value: list[str]) -> list[str]:
+        cleaned = sorted({s.strip().upper() for s in value if s.strip()})
+        for supplier_id in cleaned:
+            if len(supplier_id) > 32 or not supplier_id.replace("-", "").isalnum():
+                raise ValueError(f"Invalid supplier ID: {supplier_id!r}")
+        return cleaned
+
+    @model_validator(mode="after")
+    def cap_not_below_single_payment(self):
+        if self.weekly_cap_zar < self.max_payment_zar:
+            raise ValueError("Weekly cap cannot be lower than the maximum single payment")
+        return self
 
 
-@app.put(
-    "/admin/spending-limit",
-    dependencies=[Depends(require_admin_key)],
-)
-def update_spending_limit(request: SpendingLimitUpdate):
-    limit = set_spending_limit(request.max_payment)
+def _check_key(provided: str | None, env_name: str, label: str) -> None:
+    expected = os.getenv(env_name)
+    if not expected:
+        raise HTTPException(status_code=503, detail=f"{label} authentication is not configured")
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail=f"Invalid {label.lower()} credentials")
 
+
+def require_service_key(x_service_key: str | None = Header(default=None)):
+    _check_key(x_service_key, "RULES_SERVER_API_KEY", "Service")
+
+
+def require_admin_key(x_admin_key: str | None = Header(default=None)):
+    """CFO-only. The agent holds RULES_SERVER_API_KEY, never this key."""
+    admin_key = os.getenv("RULES_ADMIN_KEY")
+    if admin_key and admin_key == os.getenv("RULES_SERVER_API_KEY"):
+        # Fail closed: if the agent's key could change limits, the limits mean nothing.
+        raise HTTPException(status_code=503, detail="Admin key must differ from the agent's service key")
+    _check_key(x_admin_key, "RULES_ADMIN_KEY", "Admin")
+
+
+@app.get("/")
+def root():
     return {
-        "updated": True,
-        "max_payment": str(limit),
-    }
-
-
-@app.get(
-    "/admin/payment-history",
-    dependencies=[Depends(require_admin_key)],
-)
-def read_payment_history():
-    return {
-        "payments": list_payment_history(limit=100),
-    }
-
-
-@app.get("/public/payments")
-def read_public_payments(limit: int = 100):
-    """Return restricted demonstration payment records."""
-    if not 1 <= limit <= 100:
-        raise HTTPException(
-            status_code=422,
-            detail="Limit must be between 1 and 100",
-        )
-
-    return {
-        "network": "XRPL Testnet",
-        "environment": "demonstration",
-        "payments": list_public_payments(limit=limit),
+        "service": "Imali Yethu Rules Server",
+        "status": "running",
+        "endpoints": {
+            "health": "GET /health",
+            "docs": "GET /docs",
+            "validate": "POST /validate-payment",
+            "authorize": "POST /authorize-payment (service key)",
+            "verify": "POST /verify-xrpl-transaction (service key)",
+            "cosign": "POST /cosign (service key): multisig co-signature after every check passes",
+            "policy": "GET/PUT /policy (CFO admin key)",
+            "pause": "POST /pause (CFO admin key)",
+        },
     }
 
 
@@ -151,14 +106,21 @@ def health():
 @app.post("/validate-payment")
 def validate_payment(payment: PaymentRequest):
     reasons = []
+    current = policy.load_policy()
 
-    if payment.supplier_id not in APPROVED_SUPPLIERS:
+    if current.get("paused"):
+        reasons.append("Payments are paused by the CFO")
+
+    if payment.supplier_id not in set(current["approved_suppliers"]):
         reasons.append("Supplier is not approved")
 
-    if payment.amount > get_spending_limit():
+    if payment.amount > Decimal(current["max_payment_zar"]):
         reasons.append("Payment exceeds the spending limit")
 
-    invoice = APPROVED_INVOICES.get(payment.invoice_number)
+    if reserved_total_last_7_days() + payment.amount > Decimal(current["weekly_cap_zar"]):
+        reasons.append("Payment would exceed the weekly spending cap")
+
+    invoice = load_invoices().get(payment.invoice_number)
 
     if invoice is None:
         reasons.append("Invoice is not registered")
@@ -175,6 +137,7 @@ def validate_payment(payment: PaymentRequest):
         "reasons": reasons,
     }
 
+
 @app.post(
     "/authorize-payment",
     dependencies=[Depends(require_service_key)],
@@ -188,13 +151,11 @@ def authorize_payment(payment: PaymentRequest):
             "reasons": validation["reasons"],
         }
 
-    result = authorize_invoice(
+    return authorize_invoice(
         invoice_number=payment.invoice_number,
         supplier_id=payment.supplier_id,
         amount=str(payment.amount),
     )
-
-    return result
 
 
 @app.post(
@@ -204,20 +165,70 @@ def authorize_payment(payment: PaymentRequest):
 def verify_transaction(transaction: dict):
     return verify_xrpl_transaction(transaction)
 
-@app.post(
-    "/validate-agent-payment",
-    dependencies=[Depends(require_service_key)],
-)
-def validate_agent_transaction(transaction: dict):
-    return validate_agent_payment(transaction)
-
-
-from rules_server.execution import execute_agent_payment
-
 
 @app.post(
     "/cosign",
     dependencies=[Depends(require_service_key)],
 )
-def cosign_agent_payment(transaction: dict):
-    return execute_agent_payment(transaction)
+def cosign(request: CosignRequest):
+    """Add the rules server's multisig signature to a fully autofilled payment.
+
+    Signs only if: payments are not paused, the exact transaction matches the
+    invoice register (supplier wallet, amount, memo, fee, flags), and the invoice
+    was reserved through /authorize-payment and has not been signed before.
+    """
+    from xrpl.models.transactions import Payment
+    from xrpl.transaction import sign
+    from xrpl.wallet import Wallet
+
+    tx_json = request.tx_json
+    if policy.load_policy().get("paused"):
+        return {"signed": False, "reasons": ["Payments are paused by the CFO"]}
+    if "Signers" in tx_json or "TxnSignature" in tx_json:
+        return {"signed": False, "reasons": ["Send the unsigned transaction"]}
+
+    verification = verify_xrpl_transaction(tx_json, autofilled=True)
+    if not verification["verified"]:
+        return {"signed": False, "reasons": verification["reasons"]}
+
+    seed = os.getenv("RULES_SERVER_SEED")
+    if not seed:
+        raise HTTPException(status_code=503, detail="Rules server signing key is not configured")
+
+    invoice_number = verification["invoice_number"]
+    if not mark_signed(invoice_number):
+        return {"signed": False, "reasons": ["Invoice not reserved, or already co-signed"]}
+
+    try:
+        signed = sign(Payment.from_xrpl(tx_json), Wallet.from_seed(seed), multisign=True)
+    except Exception:
+        release_signature(invoice_number)
+        raise HTTPException(status_code=500, detail="Signing failed")
+
+    return {"signed": True, "invoice_number": invoice_number, "tx_json": signed.to_xrpl()}
+
+
+@app.post("/pause", dependencies=[Depends(require_admin_key)])
+def set_pause(request: PauseRequest):
+    """Kill switch enforced here: a paused rules server refuses to approve or co-sign."""
+    current = policy.load_policy()
+    policy.save_policy({**current, "paused": request.paused})
+    return {"paused": request.paused}
+
+
+@app.get("/policy", dependencies=[Depends(require_admin_key)])
+def get_policy():
+    current = policy.load_policy()
+    return {**current, "spent_last_7_days_zar": f"{reserved_total_last_7_days():.2f}"}
+
+
+@app.put("/policy", dependencies=[Depends(require_admin_key)])
+def put_policy(update: PolicyUpdate):
+    saved = policy.save_policy({
+        "max_payment_zar": f"{update.max_payment_zar:.2f}",
+        "weekly_cap_zar": f"{update.weekly_cap_zar:.2f}",
+        "approved_suppliers": update.approved_suppliers,
+        "paused": bool(policy.load_policy().get("paused")),
+    })
+    return {"saved": True, "policy": saved}
+

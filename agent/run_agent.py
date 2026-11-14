@@ -1,228 +1,171 @@
-
-"""Imali Yethu autonomous XRPL Testnet agent.
-
-Reads a demo invoice, prepares and signs an XRPL payment,
-then requests independent Rules Server authorization.
-
-Default mode: validation only, no payment submission.
 """
+Imali Yethu payment agent.
 
+    python -m agent.run_agent data/sample_invoices/honest.txt            # dry run
+    python -m agent.run_agent data/sample_invoices/honest.txt --submit   # pay on Testnet
+    python -m agent.run_agent data/sample_invoices/hacked.txt --simulate-compromised
+
+Flow: read invoice (Claude) -> agent checks -> rules server validate,
+verify transaction, reserve invoice -> submit to XRPL -> log decision.
+"""
 import argparse
 import json
-import sys
+import os
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
-import httpx
-from dotenv import dotenv_values
-from xrpl.clients import JsonRpcClient
-from xrpl.models.transactions import Memo, Payment
-from xrpl.transaction import autofill, sign
-from xrpl.utils import str_to_hex
-from xrpl.wallet import Wallet
+from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
-CONFIG_FILE = ROOT / "config" / "agent.env"
+from agent.invoice_reader import read_invoice
+from agent.price_check import check_prices
+from agent.rules_client import RulesServerClient
+from agent.xrpl_payments import (
+    TESTNET_EXPLORER,
+    CosignRefused,
+    build_payment,
+    submit_payment,
+    zar_to_drops,
+)
 
-INVOICE = {
-    "invoice_number": "INV-2026-0001",
-    "supplier_id": "SUP-001",
-    "invoice_amount_zar": "15000.00",
-    "testnet_amount_drops": "10000000",
-}
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+LOG_PATH = DATA_DIR / "payments.jsonl"
+CONTROL_PATH = DATA_DIR / "agent_control.json"
+SUPPLIERS_PATH = DATA_DIR / "suppliers.json"
 
 
-def load_config():
-    config = dotenv_values(CONFIG_FILE)
+def agent_paused() -> bool:
+    try:
+        return bool(json.loads(CONTROL_PATH.read_text()).get("paused"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
 
-    required = (
-        "XRPL_RPC_URL",
-        "DEMO_TREASURY_ADDRESS",
-        "AGENT_SEED",
-        "HONEST_SUPPLIER_ADDRESS",
-        "RULES_SERVER_API_KEY",
+
+def log_decision(record: dict) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def run_invoice(
+    invoice_text: str,
+    *,
+    reader=read_invoice,
+    rules: RulesServerClient | None = None,
+    submitter=None,
+    submit: bool = False,
+    simulate_compromised: bool = False,
+) -> dict:
+    rules = rules or RulesServerClient()
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "status": None,
+        "reasons": [],
+        "simulated_compromise": simulate_compromised,
+    }
+
+    def finish(status: str, reasons: list[str] | None = None) -> dict:
+        record["status"] = status
+        record["reasons"] = reasons or []
+        log_decision(record)
+        return record
+
+    if agent_paused():
+        return finish("paused", ["Agent paused by CFO"])
+
+    # 1. Read the invoice (untrusted input)
+    invoice = reader(invoice_text)
+    amount_zar = Decimal(str(invoice.total_zar)).quantize(Decimal("0.01"))
+    record.update(
+        invoice_number=invoice.invoice_number,
+        supplier_id=invoice.supplier_id,
+        supplier_name=invoice.supplier_name,
+        amount_zar=str(amount_zar),
     )
 
-    missing = [
-        name for name in required
-        if not config.get(name)
-    ]
+    # 2. Agent-side checks. A compromised agent skips its own safeguards,
+    #    which is exactly why the rules server must check independently.
+    if not simulate_compromised:
+        reasons = []
+        if invoice.embedded_instructions:
+            reasons.append("Invoice contains instructions aimed at the payment system: "
+                           + " | ".join(invoice.embedded_instructions))
+        reasons += check_prices(invoice)
+        if reasons:
+            return finish("blocked_by_agent", reasons)
 
-    if missing:
-        raise RuntimeError(
-            "Missing agent configuration: "
-            + ", ".join(missing)
-        )
+    # 3. Destination comes from the supplier register, never from the invoice
+    suppliers = json.loads(SUPPLIERS_PATH.read_text())
+    supplier = suppliers.get(invoice.supplier_id or "")
+    if supplier is None:
+        return finish("blocked_by_agent", [f"Supplier {invoice.supplier_id!r} is not registered"])
 
-    if config.get("RULES_SERVER_SEED"):
-        raise RuntimeError(
-            "Agent configuration must not contain "
-            "the Rules Server private key"
-        )
+    destination = os.getenv(supplier["wallet_env"], "")
+    if simulate_compromised:
+        destination = os.getenv("FAKE_SUPPLIER_ADDRESS", "rFakeSupplierWalletXXXXXXXXXXXXX")
 
-    return config
-
-
-def prepare_payment(config):
-    """Prepare a transaction and sign it as the agent."""
-
-    wallet = Wallet.from_seed(config["AGENT_SEED"])
-
-    client = JsonRpcClient(config["XRPL_RPC_URL"])
-
-    payment = Payment(
-        account=config["DEMO_TREASURY_ADDRESS"],
-        destination=config["HONEST_SUPPLIER_ADDRESS"],
-        amount=INVOICE["testnet_amount_drops"],
-        fee="30",
-        signing_pub_key="",
-        memos=[
-            Memo(
-                memo_type=str_to_hex("invoice"),
-                memo_data=str_to_hex(
-                    INVOICE["invoice_number"]
-                ),
-            )
-        ],
+    tx = build_payment(
+        treasury=os.getenv("TREASURY_ADDRESS", ""),
+        destination=destination,
+        amount_drops=zar_to_drops(amount_zar),
+        invoice_number=invoice.invoice_number,
     )
+    record.update(destination=destination, amount_drops=tx["Amount"])
 
-    prepared = autofill(payment, client)
+    # 4. Independent rules server: validate, verify the exact tx, then reserve
+    validation = rules.validate_payment(invoice.invoice_number, invoice.supplier_id, str(amount_zar))
+    if not validation.get("approved"):
+        return finish("blocked_by_rules_server", validation.get("reasons", []))
 
-    # The signed transaction must contain an explicit fee,
-    # sequence and ledger expiry.
-    if (
-        prepared.fee is None
-        or prepared.sequence is None
-        or prepared.last_ledger_sequence is None
-    ):
-        raise RuntimeError(
-            "XRPL transaction preparation incomplete"
-        )
+    verification = rules.verify_transaction(tx)
+    if not verification.get("verified"):
+        return finish("blocked_by_rules_server", verification.get("reasons", []))
 
-    # Do not authorize an unexpectedly high fee.
-    if int(prepared.fee) > 1000:
-        raise RuntimeError(
-            "Transaction fee exceeds safety limit"
-        )
+    # A dry run stops here, so it never uses up the invoice's single approval.
+    if not submit:
+        return finish("approved_dry_run")
 
-    signed = sign(
-        prepared,
-        wallet,
-        multisign=True,
-    )
+    # 5. Reserve the invoice (single use), then sign and submit.
+    #    In multisig mode the rules server co-signs only reserved invoices.
+    authorization = rules.authorize_payment(invoice.invoice_number, invoice.supplier_id, str(amount_zar))
+    if not authorization.get("authorized"):
+        reason = authorization.get("reason") or "; ".join(authorization.get("reasons", []))
+        return finish("blocked_by_rules_server", [reason])
 
-    return signed.to_xrpl()
+    submitter = submitter or (lambda tx_json: submit_payment(tx_json, rules=rules))
+    try:
+        result_code, tx_hash = submitter(tx)
+    except CosignRefused as exc:
+        return finish("blocked_by_rules_server", [str(exc)])
+    except Exception as exc:  # network, signing, ledger errors
+        return finish("failed", [f"{type(exc).__name__}: {exc}"])
 
-
-def send_proposal(transaction, config, execute=False):
-    """Send a signed proposal to the local Rules Server."""
-
-    endpoint = (
-        "/cosign" if execute
-        else "/validate-agent-payment"
-    )
-
-    url = "http://127.0.0.1:8000" + endpoint
-
-    response = httpx.post(
-        url,
-        headers={
-            "X-Service-Key":
-                config["RULES_SERVER_API_KEY"]
-        },
-        json=transaction,
-        timeout=30.0 if not execute else 120.0,
-    )
-
-    response.raise_for_status()
-
-    return response.json()
+    record.update(tx_hash=tx_hash, explorer=TESTNET_EXPLORER + tx_hash, result=result_code)
+    return finish("paid" if result_code == "tesSUCCESS" else "failed",
+                  [] if result_code == "tesSUCCESS" else [f"Ledger result {result_code}"])
 
 
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--execute",
-        action="store_true",
-        help="Request actual Testnet execution",
-    )
-
+def main() -> None:
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Imali Yethu payment agent")
+    parser.add_argument("invoice", type=Path, help="Path to an invoice text file")
+    parser.add_argument("--submit", action="store_true", help="Submit approved payments to XRPL Testnet")
+    parser.add_argument("--simulate-compromised", action="store_true",
+                        help="Demo: agent ignores its own checks and pays the fake supplier")
     args = parser.parse_args()
 
-    config = load_config()
-
-    wallet = Wallet.from_seed(
-        config["AGENT_SEED"]
+    record = run_invoice(
+        args.invoice.read_text(encoding="utf-8"),
+        submit=args.submit,
+        simulate_compromised=args.simulate_compromised,
     )
 
-    print("Imali Yethu Agent")
-    print("Agent address:", wallet.address)
-    print("Invoice:", INVOICE["invoice_number"])
-    print("Supplier:", INVOICE["supplier_id"])
-    print(
-        "Testnet payment:",
-        INVOICE["testnet_amount_drops"],
-        "drops",
-    )
-    print(
-        "Mode:",
-        "EXECUTE" if args.execute
-        else "VALIDATION ONLY",
-    )
-
-    if args.execute:
-        print(
-            "Live execution requested. "
-            "The Rules Server must independently "
-            "authorize the payment."
-        )
-
-    transaction = prepare_payment(config)
-
-    print("Agent signature created.")
-
-    result = send_proposal(
-        transaction,
-        config,
-        execute=args.execute,
-    )
-
-    print(
-        "Rules Server response:",
-        json.dumps(result, indent=2),
-    )
-
-    if args.execute:
-        tx_hash = result.get("transaction_hash")
-
-        if result.get("validated") and tx_hash:
-            print(
-                "Explorer:",
-                "https://testnet.xrpl.org/transactions/"
-                + tx_hash,
-            )
-        elif result.get("reconciliation_required"):
-            print(
-                "Payment outcome uncertain. "
-                "Do not retry automatically."
-            )
-
-    return 0 if (
-        result.get("approved") is True
-    ) else 1
+    print(f"\nInvoice {record.get('invoice_number', '?')}: {record['status'].upper()}")
+    for reason in record["reasons"]:
+        print(f"  - {reason}")
+    if record.get("explorer"):
+        print(f"  {record['explorer']}")
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (
-        RuntimeError,
-        ValueError,
-        httpx.HTTPError,
-    ) as exc:
-        print(
-            "Agent execution failed:",
-            type(exc).__name__,
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    main()

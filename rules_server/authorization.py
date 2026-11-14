@@ -1,276 +1,86 @@
-
-"""Invoice authorization and payment audit storage."""
-
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
-DB_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "data"
-    / "authorizations.db"
-)
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "authorizations.db"
 
 
-def get_connection():
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA busy_timeout = 10000")
-
-    conn.execute(
-        """
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS authorizations (
             invoice_number TEXT PRIMARY KEY,
             supplier_id TEXT NOT NULL,
             amount TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'reserved'
+            status TEXT NOT NULL DEFAULT 'reserved',
+            created_at TEXT
         )
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS payment_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            invoice_number TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            reason TEXT,
-            transaction_hash TEXT,
-            created_at TEXT NOT NULL
-                DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    conn.commit()
+    """)
+    # Older databases were created without created_at: add it, and date
+    # existing rows to now so they count towards the current week.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(authorizations)")}
+    if "created_at" not in columns:
+        conn.execute("ALTER TABLE authorizations ADD COLUMN created_at TEXT")
+        conn.execute("UPDATE authorizations SET created_at = ? WHERE created_at IS NULL", (_now(),))
+        conn.commit()
     return conn
 
 
-def record_audit(
-    invoice_number: str,
-    event_type: str,
-    reason: str | None = None,
-    transaction_hash: str | None = None,
-):
-    """Record a payment decision without storing credentials."""
-
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO payment_audit (
-                invoice_number,
-                event_type,
-                reason,
-                transaction_hash
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                invoice_number,
-                event_type,
-                reason,
-                transaction_hash,
-            ),
-        )
-
-
-def authorize_invoice(
-    invoice_number: str,
-    supplier_id: str,
-    amount: str,
-):
-    """Atomically reserve an invoice once."""
-
-    with get_connection() as conn:
+def authorize_invoice(invoice_number: str, supplier_id: str, amount: str):
+    with _connect() as conn:
         try:
             conn.execute(
                 """
-                INSERT INTO authorizations (
-                    invoice_number,
-                    supplier_id,
-                    amount
-                )
-                VALUES (?, ?, ?)
+                INSERT INTO authorizations
+                    (invoice_number, supplier_id, amount, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (
-                    invoice_number,
-                    supplier_id,
-                    amount,
-                ),
+                (invoice_number, supplier_id, amount, _now()),
             )
-
-            conn.execute(
-                """
-                INSERT INTO payment_audit (
-                    invoice_number,
-                    event_type,
-                    reason
-                )
-                VALUES (?, 'RESERVED', 'Invoice reserved')
-                """,
-                (invoice_number,),
-            )
-
             conn.commit()
-
-            return {
-                "authorized": True,
-                "reason": "Invoice reserved",
-            }
-
+            return {"authorized": True, "reason": "Invoice reserved"}
         except sqlite3.IntegrityError:
-            conn.rollback()
-
-            record_audit(
-                invoice_number,
-                "BLOCKED",
-                "Invoice already reserved or authorized",
-            )
-
             return {
                 "authorized": False,
-                "reason": (
-                    "Invoice already reserved or authorized"
-                ),
+                "reason": "Invoice already reserved or authorized",
             }
 
 
-def update_payment_status(
-    invoice_number: str,
-    status: str,
-    transaction_hash: str | None = None,
-):
-    """Update an existing invoice after settlement checks."""
+def mark_signed(invoice_number: str) -> bool:
+    """Move a reserved invoice to 'signed'. False if it was never reserved or is already signed.
 
-    allowed_statuses = {
-        "reserved",
-        "submitting",
-        "submitted",
-        "validated",
-        "failed",
-    }
-
-    if status not in allowed_statuses:
-        raise ValueError("Unsupported payment status")
-
-    with get_connection() as conn:
+    The UPDATE is conditional, so two co-sign requests for one invoice can never both succeed.
+    """
+    with _connect() as conn:
         cursor = conn.execute(
-            """
-            UPDATE authorizations
-            SET status = ?
-            WHERE invoice_number = ?
-            """,
-            (status, invoice_number),
+            "UPDATE authorizations SET status = 'signed' WHERE invoice_number = ? AND status = 'reserved'",
+            (invoice_number,),
         )
+        conn.commit()
+        return cursor.rowcount == 1
 
-        if cursor.rowcount != 1:
-            raise ValueError("Invoice reservation not found")
 
+def release_signature(invoice_number: str) -> None:
+    """Undo mark_signed if signing failed, so the invoice is not burned by a server error."""
+    with _connect() as conn:
         conn.execute(
-            """
-            INSERT INTO payment_audit (
-                invoice_number,
-                event_type,
-                transaction_hash
-            )
-            VALUES (?, ?, ?)
-            """,
-            (
-                invoice_number,
-                status.upper(),
-                transaction_hash,
-            ),
+            "UPDATE authorizations SET status = 'reserved' WHERE invoice_number = ? AND status = 'signed'",
+            (invoice_number,),
         )
-
         conn.commit()
 
 
-def get_payment_audit(invoice_number: str):
-    """Retrieve the audit history for one invoice."""
-
-    with get_connection() as conn:
+def reserved_total_last_7_days() -> Decimal:
+    """Sum of invoices reserved in the last 7 days (counts towards the weekly cap)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    with _connect() as conn:
         rows = conn.execute(
-            """
-            SELECT
-                event_type,
-                reason,
-                transaction_hash,
-                created_at
-            FROM payment_audit
-            WHERE invoice_number = ?
-            ORDER BY id ASC
-            """,
-            (invoice_number,),
+            "SELECT amount FROM authorizations WHERE created_at >= ?", (cutoff,)
         ).fetchall()
-
-    return [
-        {
-            "event_type": row[0],
-            "reason": row[1],
-            "transaction_hash": row[2],
-            "created_at": row[3],
-        }
-        for row in rows
-    ]
-
-
-def list_payment_history(limit: int = 100) -> list[dict]:
-    """Return recent invoice records with their payment audit events."""
-
-    if not isinstance(limit, int) or isinstance(limit, bool):
-        raise ValueError("Invalid history limit")
-
-    if not 1 <= limit <= 100:
-        raise ValueError("History limit must be between 1 and 100")
-
-    with get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                invoice_number,
-                supplier_id,
-                amount,
-                status
-            FROM authorizations
-            ORDER BY rowid DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-
-        history = []
-
-        for invoice_number, supplier_id, amount, status in rows:
-            events = conn.execute(
-                """
-                SELECT
-                    event_type,
-                    reason,
-                    transaction_hash,
-                    created_at
-                FROM payment_audit
-                WHERE invoice_number = ?
-                ORDER BY id ASC
-                """,
-                (invoice_number,),
-            ).fetchall()
-
-            history.append(
-                {
-                    "invoice_number": invoice_number,
-                    "supplier_id": supplier_id,
-                    "amount": amount,
-                    "status": status,
-                    "events": [
-                        {
-                            "event_type": event[0],
-                            "reason": event[1],
-                            "transaction_hash": event[2],
-                            "created_at": event[3],
-                        }
-                        for event in events
-                    ],
-                }
-            )
-
-    return history
+    return sum((Decimal(r[0]) for r in rows), Decimal("0"))

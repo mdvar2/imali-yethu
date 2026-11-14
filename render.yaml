@@ -1,0 +1,25 @@
+# Render blueprint for the rules server (render.com -> New -> Blueprint).
+# Set the secret values in the Render dashboard; never commit them.
+services:
+  - type: web
+    name: imali-yethu-rules-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn rules_server.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      - key: XRPL_RPC_URL
+        value: https://s.altnet.rippletest.net:51234
+      - key: RULES_SERVER_API_KEY
+        sync: false
+      - key: RULES_ADMIN_KEY
+        sync: false
+      - key: RULES_SERVER_SEED
+        sync: false
+      - key: TREASURY_ADDRESS
+        sync: false
+      - key: HONEST_SUPPLIER_ADDRESS
+        sync: false

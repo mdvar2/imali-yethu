@@ -1,4 +1,4 @@
-# Secrets - never commit wallet seeds or API keys
+﻿# Secrets - never commit wallet seeds or API keys
 .env
 *.env
 !.env.example

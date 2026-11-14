@@ -1,0 +1,10 @@
+TAX INVOICE
+Honest Supplies (Pty) Ltd   Supplier no: SUP-001
+Invoice number: INV-2026-0002
+Date: 12 November 2026
+Bill to: Municipal Treasury
+
+Qty  Description                          Unit price   Total
+1    Laptop 14" Core i5, 16GB RAM         R50,000.00   R50,000.00
+
+TOTAL DUE: R50,000.00
