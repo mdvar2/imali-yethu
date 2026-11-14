@@ -1,7 +1,7 @@
 # Imali Yethu: Corruption-Proof Public Payments
 
 > *"Imali Yethu" means "Our Money".*
-> An AI agent that pays government suppliers only by rules nobody can secretly bend, for goods that actually arrive, with every rand public on the XRP Ledger.
+> An AI agent that pays government suppliers only by rules nobody can secretly bend, with every rand public on the XRP Ledger.
 
 **Team:** PhephaSec · **Hackathon:** Node Engine Hackathon · **Track:** Agentic Finance (Ripple)
 
@@ -9,61 +9,46 @@
 
 ## The problem
 
-South African municipalities carry a national balance of **R268 billion** in unauthorised, irregular, fruitless and wasteful expenditure (UIFWE), up from R264 billion the year before ([National Treasury MFMA compliance report 2024/25](https://www.gov.za/news/media-statements/national-treasury-releases-municipal-finance-management-act-compliance-report), pre-audit figures). Treasury links it to failures in internal controls and weak consequence management. Much of it is lost at the **payment stage**:
+South African municipalities carry a national balance of **R268 billion** in unauthorised, irregular, fruitless and wasteful expenditure (UIFWE), up from R264 billion the year before ([National Treasury MFMA compliance report 2024/25](https://www.gov.za/news/media-statements/national-treasury-releases-municipal-finance-management-act-compliance-report), pre-audit figures). Treasury links it to failures in internal controls and weak consequence management. Much of it is lost at the **payment stage**: inflated invoices, paying the same invoice twice, payments to the wrong account, and spending nobody outside the municipality can see.
 
-| Corruption trick | How Imali Yethu stops it |
-| --- | --- |
-| Inflated prices (R50,000 for laptops worth R15,000) | The agent compares invoices with market prices and blocks them |
-| Ghost deliveries (paid, nothing arrives) | Money is locked in XRPL Escrow and released only on proof of delivery |
-| Connected suppliers (a company linked to an official) | Supplier directors are checked against a list of officials and relatives |
-| Contract splitting (small invoices to dodge tender rules) | Repeated payments just under the threshold are detected |
-| Duplicate invoices | Invoice numbers are recorded and checked |
-| Hidden spending | Every payment is on a public ledger, with a citizen dashboard |
-| A corrupt official or hacked AI | Multisig: no single person, no single key and not even the agent can move money alone |
+## What works today
 
-## Target users
+| Capability | Status | Where |
+| --- | --- | --- |
+| AI invoice reading (Claude), invoice text treated as untrusted | ✅ Working | `agent/invoice_reader.py` |
+| Price check against market prices (>20% above is blocked), plain code, no AI | ✅ Working | `agent/price_check.py` |
+| Hidden-instruction (prompt injection) detection | ✅ Working | `agent/invoice_reader.py` |
+| Supplier wallet taken from the register, never from the invoice | ✅ Working | `data/suppliers.json` |
+| Independent rules server: approved suppliers, invoice register, per-payment limit, weekly cap, single-use invoices | ✅ Working | `rules_server/` |
+| Rules server checks the **exact** transaction (wallet, amount, memo, fee, flags) before signing | ✅ Working | `rules_server/xrpl_verification.py` |
+| **XRPL multisig**: rules server co-signs only after every check passes | ✅ **Live on Testnet**, Treasury master key disabled (see Testnet proof) | `POST /cosign`, `agent/xrpl_payments.py` |
+| CFO limits and kill switch, held by the rules server (agent cannot reach them) | ✅ Working | `GET/PUT /policy`, `POST /pause` |
+| Dashboard: submit invoices, decision trail, payments register, controls, staff sign-in | ✅ Working | `dashboards/app.py` |
+| Public transparency page read **live from the XRP Ledger** | ✅ Working | `dashboards/app.py` |
+| Real XRPL Testnet payments with invoice memo | ✅ Working | see Testnet proof |
+| Escrow: "no delivery, no payment" | 🔜 Roadmap | |
+| Connected-supplier and contract-splitting checks | 🔜 Roadmap | |
+| Live supplier data from the Central Supplier Database (CSD) and CIPC | 🔜 Roadmap | |
 
-- **Primary:** municipal CFOs and finance teams in South Africa who need clean audits. Pilot: one Free State municipality's maintenance and supplies budget.
-- **Secondary:** NGOs and corporate CSI funders managing public or donor money.
-- **Beneficiaries:** citizens, who can see where every rand goes.
-- **Beyond South Africa:** the same payment-stage fraud affects public bodies and donor-funded programmes across Africa. Only the data sources (supplier register, officials list, price list) are country-specific; the payment controls are not.
-
-## Core features
-
-1. **AI invoice checker:** reads invoices, compares prices with market rates, approves or blocks with a plain-language reason.
-2. **No delivery, no payment:** approved payments are locked in XRPL Escrow and released only when the receiving official confirms delivery against the purchase order (photo as supporting evidence). If the deadline passes without delivery, the rules server cancels the escrow and the money returns to Treasury.
-3. **Rules the agent can't override:** an independent rules server co-signs payments through XRPL multisig.
-4. **Human-controlled limits:** a CFO dashboard sets spending caps, approved suppliers and price ranges, outside the agent.
-5. **Public transparency page:** every payment, linked to the XRP Ledger.
-
-## How it fits the Agentic Finance track
-
-| Requirement | How Imali Yethu meets it |
-| --- | --- |
-| At least one XRPL Testnet transaction executed autonomously by an agent | The AI agent creates escrow payments to approved suppliers |
-| Limits enforced somewhere the agent doesn't control | Treasury multisig: every payment needs the agent **and** the independent rules server |
-| A human operator can set or change limits, outside the agent | CFO dashboard edits the caps, approved suppliers and price ranges stored in the rules server. The agent has no access to them |
-
-## Architecture
+## How a payment flows
 
 ```mermaid
 flowchart TD
-    A[Invoice + purchase order] --> B[AI agent checks invoice and signs]
-    B --> C{Rules server: all checks pass?}
-    C -- fail --> X[Blocked, CFO alerted]
-    C -- pass, co-signed --> D[Escrow locked on XRPL]
-    D --> E{Goods delivered?}
-    E -- "no, deadline passes" --> R[Rules server submits EscrowCancel: refund to Treasury]
-    E -- "yes, fulfillment released" --> P[EscrowFinish: supplier paid]
-    CFO[CFO dashboard] -. sets limits .-> C
-    P --> T[Citizen transparency page]
-    X --> T
-    R --> T
+    A[Supplier invoice] --> B[AI agent reads it: untrusted text]
+    B --> C{Agent checks: prices, totals, hidden instructions}
+    C -- fail --> X[Blocked, shown on dashboard]
+    C -- pass --> D{Rules server: supplier, invoice register, limits, exact transaction}
+    D -- fail --> X
+    D -- pass --> E[Invoice reserved: single use]
+    E --> F[Rules server co-signs + agent signs]
+    F --> G[XRP Ledger accepts: quorum reached]
+    G --> T[Public transparency page, read from the ledger]
+    CFO[CFO dashboard] -. limits, pause .-> D
 ```
 
 ## Security model
 
-The municipal Treasury account has its **master key disabled** and is controlled by an XRPL signer list with **quorum 3**:
+The Treasury account is controlled by an XRPL signer list with **quorum 3**:
 
 | Signer | Weight | Who holds the key |
 | --- | --- | --- |
@@ -76,98 +61,126 @@ The municipal Treasury account has its **master key disabled** and is controlled
 | --- | --- | --- |
 | Agent alone | 1 | No |
 | Rules server alone | 2 | No |
-| Any one human | 1 | No |
-| Agent + one human | 2 | No |
 | **Agent + rules server** (normal path) | 3 | Yes, only if every rule passes |
-| Agent + CFO + Municipal Manager (emergency) | 3 | Yes, needs two humans to agree |
+| Agent + CFO + Municipal Manager (emergency) | 3 | Yes, two humans must agree |
 
-**Rules server safeguards**
+With the master key disabled (`setup_multisig.py --disable-master`), **the ledger itself** rejects any payment the rules server did not sign. A hacked agent can propose a payment to a fake wallet, but it cannot complete it.
 
-- Checks the *whole* transaction before co-signing: destination, amount, invoice number and limits must match the approved invoice.
-- Each approval is single-use, so it cannot be replayed for a different payment.
-- Holds the escrow fulfillment secrets and releases one only after delivery is confirmed.
-- Runs a scheduled job that submits `EscrowCancel` for escrows past their `CancelAfter` time. (On XRPL, `CancelAfter` only makes cancellation *possible*; someone has to submit it.)
-- Policy changes from the CFO dashboard require login and are written to an audit log.
+**Rules server safeguards** (all covered by tests):
 
-**Why the hacked-agent demo matters:** invoice text is untrusted input. Even if a hidden instruction fools the AI into proposing a payment to a fake supplier, the rules server refuses to co-sign, and the ledger rejects the transaction. The limits live somewhere the agent cannot reach.
+- Signs only invoices that are registered, approved and reserved, and only once (`reserved → signed` is a single atomic update).
+- Checks the whole autofilled transaction: destination is the registered supplier's wallet, amount matches the invoice, one invoice memo, no partial-payment flags, fee under a cap, and the transaction expires.
+- Refuses everything while the CFO's kill switch is on, even if the agent ignores its own pause flag.
+- CFO limits need a separate admin key. If that key is missing, or equals the agent's key, the server fails closed.
+- Every policy change is written to an audit log with old and new values.
 
-**Privacy (POPIA):** directors' details and the officials list stay off-chain in the rules server. Only the invoice number and amount go on the public ledger.
+**Signing modes** (`SIGNING_MODE` in `.env`): `multisig` (target design), `privy` (agent's policy-limited Privy wallet), `master` (demo fallback: the Treasury seed signs alone, so only the agent-side checks and the rules server's approval apply). The dashboard's *Controls & limits* page reads the Treasury's real signer list from the ledger and says which applies.
+
+**Privacy (POPIA):** directors' details stay off-chain. Only the invoice number and amount go on the public ledger, and blocked invoices are published as totals only.
+
+## Quick start
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # macOS/Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env                # then fill in ANTHROPIC_API_KEY and the keys below
+
+python scripts/setup_wallets.py                 # funded Testnet wallets -> .env
+python scripts/setup_governance_wallets.py      # CFO and Municipal Manager wallets -> .env
+python scripts/setup_multisig.py                # shows the signer-list plan; add --apply to submit
+
+uvicorn rules_server.main:app --port 8000 --reload   # terminal 1
+streamlit run dashboards/app.py                      # terminal 2
+```
+
+Sign in to the dashboard with `DASHBOARD_CFO_PASSWORD` or `DASHBOARD_FINANCE_PASSWORD` from `.env`. The public transparency page needs no login.
+
+`.env` holds wallet seeds and keys and is git-ignored. Never commit it.
+
+## Demo script
+
+Before presenting, clear local state so every scenario runs fresh: `python scripts/reset_demo.py --yes`, then restart the rules server.
+
+In the dashboard, open **Submit invoice** and use the samples:
+
+| # | Invoice | What happens |
+| --- | --- | --- |
+| 1 | Laptop, correct price | Approved, co-signed, paid on Testnet. Link to the ledger. |
+| 2 | Office chairs (second supplier) | Approved and paid: any registered invoice works. |
+| 3 | Laptop at an inflated price | Blocked by the agent: 233% above market price. |
+| 4 | Invoice with hidden instructions | Blocked by the agent: instructions aimed at the payment system. |
+| 5 | Same, with **Demo: simulate a hacked agent** | The agent is fooled and tries to pay a fake wallet. The rules server refuses to co-sign. No money moves. |
+| 6 | Laptop again | Blocked: invoice already paid. |
+| 7 | CFO pauses payments, then any invoice | Blocked by the rules server: payments paused. |
+
+Then open **Public transparency**: the payments are read straight from the XRP Ledger.
+
+## Deployment
+
+- **Dashboard:** Streamlit Community Cloud, main file `dashboards/app.py`. Put the `.env` values in the app's *Secrets*.
+- **Rules server:** `render.yaml` is a Render blueprint (`uvicorn rules_server.main:app`). Set the secret values in Render.
+- **CI:** `.github/workflows/tests.yml` runs the test suite on every push. Tests need no secrets or network: Claude is mocked and XRPL keys are generated offline.
+
+## Business model and go-to-market
+
+**Who buys first.** Donor-funded programmes, NGOs and corporate social investment (CSI) funds that pay many small suppliers and must prove where the money went. They can adopt new tools in weeks. Municipalities follow through provincial or National Treasury pilots, starting with one municipality's maintenance and supplies budget.
+
+**Pricing (proposed).** A monthly platform fee per organisation, tiered by annual spend through the system, plus a small fee per payment for donor programmes. The value case is simple: one blocked inflated invoice (R35,000 in the demo) can pay for a year's subscription.
+
+**Market.** South Africa has 257 municipalities and each must report irregular expenditure every year. The controls are country-neutral; only the data sources (supplier register, officials list, price list) change, so the same product fits public bodies and donor programmes across Africa.
+
+**Fit with local infrastructure.**
+
+| Need | Plan |
+| --- | --- |
+| Pay in rand | XRPL as the control and audit layer; settle through a regulated rand stablecoin or RLUSD with a local off-ramp or bank partner |
+| Supplier registration and tax compliance | Check suppliers against National Treasury's Central Supplier Database (CSD) |
+| Connected suppliers | Match company directors (CIPC records) against officials and their relatives |
+| Municipal reporting | Export payment records for mSCOA reporting and the Auditor-General |
+| Regulation | Designed around MFMA supply chain management rules, POPIA, and SARB guidance on crypto assets |
+
+## What it can't stop (yet)
+
+Rigged tender decisions before the payment stage, cash bribes, and false ownership disclosures by suppliers. Next steps: escrow until delivery is confirmed, links to tender award records, and supplier ownership data.
+
+## Testnet proof
+
+Treasury: [`rBuepf14KHmh3kf5xnMfG9G4MbM62CRbHL`](https://testnet.xrpl.org/accounts/rBuepf14KHmh3kf5xnMfG9G4MbM62CRbHL)
+
+| Step | Transaction |
+| --- | --- |
+| First payment (Treasury → Honest Supplier, 10 XRP, memo INV-2026-0001) | [7E5179…AEC57](https://testnet.xrpl.org/transactions/7E5179129DA1FB6847C7ADA11A49E3EEB65691EDE8F2D56CE5F56B68242AEC57) |
+| Treasury signer list set: agent 1, rules server 2, CFO 1, Municipal Manager 1, quorum 3 | [BEBFEA…23D11](https://testnet.xrpl.org/transactions/BEBFEA240F94F4F9DFAC9B2375C109FF777ECC156AA2B965382FB9B903E23D11) |
+| **Multisigned payment**, signed by AI agent + rules server (INV-2026-0003, 8.33 XRP) | [0D2A1D…29993](https://testnet.xrpl.org/transactions/0D2A1DD6CBB746942F9411793278DCED932BD5E748F1C430A4F087CF9D529993) |
+| Treasury master key disabled | [F7689E…10CA5](https://testnet.xrpl.org/transactions/F7689E8D05A90C195F0FC565A9951E38E8734CD5340F8589000BCF32D6610CA5) |
+
+After the master key was disabled, two attacks were tried against Testnet and **rejected by the ledger itself**:
+
+| Attempt | Ledger result |
+| --- | --- |
+| Pay with the old Treasury master key (e.g. a stolen seed) | `tefMASTER_DISABLED` |
+| A hacked agent signs alone, skipping the rules server | `tefBAD_QUORUM` |
+
+Since the master key is disabled, `scripts/first_payment.py` no longer works. All payments go through the agent and the rules server. `scripts/emergency_restore_master.py` re-enables the master key with CFO + Municipal Manager + agent signatures.
 
 ## Repository structure
 
 ```
 imali-yethu/
-├── agent/          # AI invoice checker + XRPL transactions
-├── rules_server/   # FastAPI co-signer + corruption checks
-├── dashboards/     # Streamlit: CFO, delivery, citizen pages
-├── data/           # sample suppliers, officials, price list
-└── scripts/        # wallet setup and Testnet test scripts
+├── agent/          # AI invoice reader, price checks, XRPL signing (multisig / Privy / master)
+├── rules_server/   # FastAPI: policy, invoice register, verification, co-signing
+├── dashboards/     # Streamlit dashboard (app.py) and its theme and data helpers
+├── data/           # sample suppliers, invoice register, prices, sample invoices
+├── scripts/        # wallet, multisig and demo-reset scripts
+└── tests/          # 97 tests: agent, rules server, co-signing, dashboard
 ```
-
-## Getting started
-
-```bash
-git clone <this repo>
-cd imali-yethu
-python -m venv .venv
-source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-
-python scripts/setup_wallets.py   # creates 5 funded Testnet wallets, saves them to .env
-python scripts/first_payment.py   # first payment on XRPL Testnet, prints the explorer link
-```
-
-`.env` holds wallet seeds and is git-ignored. Never commit it.
-
-## Project status
-
-| Component | Status |
-| --- | --- |
-| Repo, structure, secrets handling | Done |
-| Testnet wallets + first payment with invoice memo | Done (see Testnet proof) |
-| Escrow create / finish / cancel | Next (10 Nov) |
-| Treasury multisig (quorum 3) | Planned |
-| Rules server | Planned |
-| AI invoice agent | Planned |
-| Dashboards (CFO, delivery, citizen) | Planned |
-
-## Testnet proof
-
-| Step | Transaction |
-| --- | --- |
-| First payment (Treasury → Honest Supplier, 10 XRP, memo INV-2026-0001) | [7E5179…AEC57](https://testnet.xrpl.org/transactions/7E5179129DA1FB6847C7ADA11A49E3EEB65691EDE8F2D56CE5F56B68242AEC57) |
-
-## Build plan
-
-| Day | Build |
-| --- | --- |
-| Mon 9 Nov | Repo, Testnet wallets, first payment |
-| Tue 10 Nov | Checkpoint forms; RLUSD trust lines; escrow create / finish / cancel |
-| Wed 11 Nov | Treasury multisig; sample data; rules server |
-| Thu 12 Nov (Cape Town) | AI agent; delivery confirmation; dashboards |
-| Fri 13 Nov (Cape Town) | Demo scenarios end to end; demo video; final submission by 23:59 |
-| Sat 14 Nov | Pitch and judging |
-
-## Demo scenarios
-
-1. Honest supplier: approved, escrowed, delivered, paid
-2. Inflated tender: blocked with reason
-3. Ghost delivery: deadline passes, rules server cancels the escrow, money returns to Treasury
-4. Connected supplier: blocked
-5. Contract splitting: flagged
-6. **Hacked agent:** a hidden instruction in an invoice makes the agent try to pay a fake supplier; the rules server won't co-sign, so the ledger rejects it
-
-## What it can't stop (yet)
-
-Rigged tender decisions before the payment stage, cash bribes, and false ownership disclosures by suppliers. Next steps: link to tender award records and supplier ownership data.
-
-**Real-world settlement:** municipalities pay in rand. In production, XRPL acts as the control and audit layer, with settlement through a rand stablecoin or a bank partner. The first pilot is best run with an NGO or donor fund, which can adopt it faster.
 
 ## Team
 
 | Name | Role |
 | --- | --- |
-| Melusi | AI agent, XRPL payments and escrow |
-| Nelisiwe | Security: multisig, rules server, dashboards |
+| Melusi | AI agent, XRPL payments, dashboard |
+| Nelisiwe | Security: rules server, multisig |
 
-*All supplier, official and price data in this repo is sample data.*
+*All supplier, invoice, official and price data in this repo is sample data.*

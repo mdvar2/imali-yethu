@@ -1,0 +1,11 @@
+TAX INVOICE
+Mangaung Office Solutions   Supplier no: SUP-002
+Invoice number: INV-2026-0004
+Date: 13 November 2026
+Bill to: Municipal Treasury
+Purchase order: PO-2026-0421
+
+Qty  Description                          Unit price   Total
+10   Toner cartridge HP 85A               R1,200.00    R12,000.00
+
+TOTAL DUE: R12,000.00

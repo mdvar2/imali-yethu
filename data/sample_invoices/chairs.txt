@@ -1,0 +1,11 @@
+TAX INVOICE
+Mangaung Office Solutions   Supplier no: SUP-002
+Invoice number: INV-2026-0003
+Date: 13 November 2026
+Bill to: Municipal Treasury
+Purchase order: PO-2026-0420
+
+Qty  Description                          Unit price   Total
+5    Ergonomic office chair               R2,500.00    R12,500.00
+
+TOTAL DUE: R12,500.00
